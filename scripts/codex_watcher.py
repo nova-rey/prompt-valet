@@ -2,457 +2,559 @@
 """
 codex_watcher.py
 
-Watches the Prompt Valet inbox and runs Codex on any *.prompt.md files.
+Watches the Codex inbox tree and runs Codex jobs when *.prompt.md files appear.
 
-Layout:
+Behavior summary:
 
-    /srv/prompt-valet/inbox/<repo>/<branch>/<job>.prompt.md
+- Inbox layout (root configurable via YAML; default: /srv/prompt-valet/inbox):
 
-Repo mapping:
+    /srv/prompt-valet/inbox/<repo_key>/<branch>/<job_id>.prompt.md
 
-    - <repo> maps directly to /srv/repos/<repo>
-    - branches must already exist on the remote (we checkout and pull them)
+  * <repo_key>  : literal repo name (e.g. CrapsSim-Control, Ghost-Instrument)
+  * <branch>    : literal branch name (no rewriting); may be used to create
+                  or select branches in the local /srv/repos checkout.
+  * <job_id>    : arbitrary job identifier; used to name branches / PRs etc.
 
-Auto-onboarding / cloning:
+- On seeing a new *.prompt.md file:
+  * Parse repo_key, branch, job_id from the path.
+  * Clone or update the corresponding local repo in /srv/repos/<repo_key>.
+  * Create a local branch derived from <branch> and <job_id>.
+  * Run Codex (via the codex CLI) against the repo with the prompt file.
+  * Commit any changes and push a branch / open a PR (future expansion).
+  * Move the prompt file into a processed/ tree for auditing.
 
-    - Config file: /etc/codex-runner/config.toml
+Configuration:
 
-        [watcher]
-        auto_clone_missing_repos = true
-        git_default_owner = "nova-rey"   # your real GitHub username
-        git_default_host  = "github.com"
-        git_protocol      = "https"      # or "ssh"
-        cleanup_non_git_dirs = true      # optional safety
+- Runtime configuration is loaded from a single YAML file:
 
-    - If a prompt arrives for <repo> and /srv/repos/<repo> does not exist:
-        - When auto_clone_missing_repos is true, we git-clone
-          via ssh or https into /srv/repos/<repo>.
+    /srv/prompt-valet/config/prompt-valet.yaml
+
+  At minimum, this may contain:
+
+    watcher:
+      inbox_dir: /srv/prompt-valet/inbox
+      processed_dir: /srv/prompt-valet/processed
+      auto_clone_missing_repos: true
+      git_default_owner: null        # e.g. "nova-rey"
+      git_default_host: github.com
+      git_protocol: https
+      codex_runner_cmd: codex
+      codex_model: gpt-5.1-codex-mini
+      codex_sandbox: danger-full-access
+
+- If the YAML file is missing or invalid, DEFAULT_CONFIG is used.
+
+Logging:
+
+- On startup, the watcher logs a single config summary line:
+
+    [prompt-valet] loaded config=<path|<defaults>> inbox=<inbox_dir> processed=<processed_dir> git_owner=<owner> git_host=<host> git_protocol=<proto> runner=<cmd>
+
+  This matches rebuild_inbox_tree.py so it's easy to confirm that both scripts
+  are reading the same configuration.
 """
 
+from __future__ import annotations
+
+import dataclasses
+import fnmatch
 import os
-import re
-import secrets
+import queue
 import shutil
 import subprocess
+import sys
+import threading
 import time
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional, Tuple
 
+from watchdog.events import FileSystemEventHandler, FileCreatedEvent, FileMovedEvent
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
 
-INBOX_DIR = "/srv/prompt-valet/inbox"
-PROCESSED_DIR = "/srv/prompt-valet/processed"
-REPOS_ROOT = "/srv/repos"
-CONFIG_PATH = "/etc/codex-runner/config.toml"
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore[assignment]
 
-# Codex model to use by default
-DEFAULT_MODEL = "gpt-5.1-codex-mini"
+# ---------------------------------------------------------------------------
+# Default configuration & constants
+# ---------------------------------------------------------------------------
 
-# Sandbox mode: "read-only", "workspace-write", or "danger-full-access"
-DEFAULT_SANDBOX = "danger-full-access"
+DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
 
-# Default config if no config file exists or keys are missing.
 DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
-    "tree_builder": {
-        "greedy_inboxes": False,
-    },
     "watcher": {
+        "inbox_dir": "/srv/prompt-valet/inbox",
+        "processed_dir": "/srv/prompt-valet/processed",
         "auto_clone_missing_repos": True,
-        "git_default_owner": None,
+        "git_default_owner": None,  # e.g. "nova-rey"
         "git_default_host": "github.com",
-        "git_protocol": "ssh",
-        "cleanup_non_git_dirs": False,
-    },
+        "git_protocol": "https",
+        "codex_runner_cmd": "codex",
+        "codex_model": "gpt-5.1-codex-mini",
+        "codex_sandbox": "danger-full-access",
+    }
 }
+
+# Derived / convenience defaults
+DEFAULT_INBOX_DIR = Path(DEFAULT_CONFIG["watcher"]["inbox_dir"])
+DEFAULT_PROCESSED_DIR = Path(DEFAULT_CONFIG["watcher"]["processed_dir"])
+DEFAULT_REPOS_ROOT = Path("/srv/repos")
+
+DEFAULT_RUNNER_CMD = DEFAULT_CONFIG["watcher"]["codex_runner_cmd"]
+DEFAULT_MODEL = DEFAULT_CONFIG["watcher"]["codex_model"]
+DEFAULT_SANDBOX = DEFAULT_CONFIG["watcher"]["codex_sandbox"]
 
 
 def log(msg: str) -> None:
-    ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"[codex_watcher] [{ts}] {msg}", flush=True)
+    """Simple stdout logger with prefix."""
+    print(f"[codex_watcher] {time.strftime('[%Y-%m-%dT%H:%M:%SZ]', time.gmtime())} {msg}", flush=True)
 
 
-def run(cmd, cwd=None, env=None, check=True):
-    """Thin wrapper around subprocess.run that logs commands."""
-    log(f"RUN: {cmd!r} (cwd={cwd})")
+# ---------------------------------------------------------------------------
+# YAML config loading
+# ---------------------------------------------------------------------------
+
+
+def _load_yaml_file(path: Path) -> Dict[str, Any]:
+    if yaml is None:
+        raise RuntimeError("PyYAML not available; install 'pyyaml' to use YAML config.")
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError("Top-level YAML config must be a mapping.")
+    return data
+
+
+def load_config() -> Tuple[Dict[str, Dict[str, Any]], str]:
+    """
+    Load configuration from DEFAULT_CONFIG_PATH, merged over DEFAULT_CONFIG.
+
+    Returns:
+        (config_dict, source_label)
+
+    Where source_label is either the actual YAML path (as string) if the file
+    was successfully loaded, or "<defaults>" if only DEFAULT_CONFIG was used.
+    """
+    cfg: Dict[str, Dict[str, Any]] = {k: v.copy() for k, v in DEFAULT_CONFIG.items()}
+    source_label = "<defaults>"
+
+    if DEFAULT_CONFIG_PATH.is_file():
+        try:
+            user_cfg = _load_yaml_file(DEFAULT_CONFIG_PATH)
+            if isinstance(user_cfg, dict):
+                for section, values in user_cfg.items():
+                    if section in cfg and isinstance(values, dict):
+                        for key, value in values.items():
+                            cfg[section][key] = value
+            source_label = str(DEFAULT_CONFIG_PATH)
+        except Exception as e:
+            log(
+                f"Warning: Failed to read YAML config at {DEFAULT_CONFIG_PATH}: {e!r}; "
+                "using defaults only."
+            )
+    else:
+        log(f"No YAML config at {DEFAULT_CONFIG_PATH}; using defaults only.")
+
+    return cfg, source_label
+
+
+# ---------------------------------------------------------------------------
+# Job context & helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class JobContext:
+    repo_key: str
+    branch: str
+    job_id: str
+    prompt_path: Path
+    inbox_dir: Path
+    processed_dir: Path
+
+    def repo_dir(self) -> Path:
+        return DEFAULT_REPOS_ROOT / self.repo_key
+
+    def processed_prompt_path(self) -> Path:
+        # Keep a mirror of inbox structure under processed_dir
+        return self.processed_dir / self.repo_key / self.branch / f"{self.job_id}.prompt.md"
+
+
+def parse_prompt_path(root: Path, path: Path) -> Optional[JobContext]:
+    """
+    Parse a prompt path of the form:
+
+        /inbox/<repo_key>/<branch>/<job_id>.prompt.md
+
+    Returns JobContext or None if the path doesn't match.
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return None
+
+    parts = rel.parts
+    if len(parts) != 3:
+        return None
+
+    repo_key, branch, filename = parts
+    if not filename.endswith(".prompt.md"):
+        return None
+
+    job_id = filename[: -len(".prompt.md")]
+    if not repo_key or not branch or not job_id:
+        return None
+
+    return JobContext(
+        repo_key=repo_key,
+        branch=branch,
+        job_id=job_id,
+        prompt_path=path,
+        inbox_dir=root,
+        processed_dir=Path(DEFAULT_CONFIG["watcher"]["processed_dir"]),
+    )
+
+
+def ensure_repo_cloned(ctx: JobContext, cfg: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Ensure the repo exists under /srv/repos/<repo_key>.
+
+    If it doesn't exist and auto_clone_missing_repos is true, clone it from
+    git_default_owner@git_default_host using git_protocol.
+    """
+    repo_dir = ctx.repo_dir()
+    if repo_dir.is_dir():
+        log(f"Repo {ctx.repo_key} already cloned at {repo_dir}")
+        return
+
+    watcher_cfg = cfg.get("watcher", {})
+    auto_clone = bool(watcher_cfg.get("auto_clone_missing_repos", True))
+    owner = watcher_cfg.get("git_default_owner")
+    host = watcher_cfg.get("git_default_host", "github.com")
+    protocol = watcher_cfg.get("git_protocol", "https")
+
+    if not auto_clone:
+        raise RuntimeError(
+            f"Repo {ctx.repo_key!r} missing at {repo_dir} and auto_clone_missing_repos is false."
+        )
+
+    if not owner:
+        raise RuntimeError(
+            f"Repo {ctx.repo_key!r} missing at {repo_dir} and git_default_owner is not set."
+        )
+
+    url: Optional[str]
+    if protocol == "ssh":
+        url = f"git@{host}:{owner}/{ctx.repo_key}.git"
+    elif protocol == "https":
+        url = f"https://{host}/{owner}/{ctx.repo_key}.git"
+    else:
+        raise RuntimeError(f"Unsupported git protocol: {protocol!r}")
+
+    log(f"Cloning repo {ctx.repo_key!r} from {url!r} into {repo_dir}")
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "clone", url, str(repo_dir)],
+        check=True,
+    )
+
+
+def git_run(args, cwd: Path) -> None:
+    """
+    Run a git command, logging stdout/stderr for debugging.
+    """
+    log(f"RUN: {args!r} (cwd={cwd})")
     result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        env=env,
+        args,
+        cwd=str(cwd),
         text=True,
         capture_output=True,
-        check=False,
     )
     if result.stdout:
-        log(f"STDOUT:\n{result.stdout.strip()}")
+        log(f"STDOUT:\n{result.stdout.rstrip()}")
     if result.stderr:
-        log(f"STDERR:\n{result.stderr.strip()}")
-    if check and result.returncode != 0:
-        raise RuntimeError(f"Command failed with code {result.returncode}: {cmd}")
-    return result
+        log(f"STDERR:\n{result.stderr.rstrip()}")
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed with code {result.returncode}: {args!r}")
 
 
-# --- Config loading ---------------------------------------------------------
-
-
-def _load_toml_file(path: Path) -> Dict[str, Any]:
-    """Load a TOML file using tomllib or toml."""
-    # 1) stdlib tomllib (3.11+)
-    try:
-        import tomllib  # type: ignore[attr-defined]
-
-        with path.open("rb") as f:
-            return tomllib.load(f)
-    except Exception:
-        pass
-
-    # 2) external 'toml' package
-    try:
-        import toml  # type: ignore[import]
-
-        with path.open("r", encoding="utf-8") as f:
-            return toml.load(f)
-    except Exception:
-        pass
-
-    raise RuntimeError("No TOML parser available (need Python 3.11+ or install 'toml').")
-
-
-def load_config() -> Dict[str, Dict[str, Any]]:
-    cfg: Dict[str, Dict[str, Any]] = {k: v.copy() for k, v in DEFAULT_CONFIG.items()}
-    cfg_path = Path(CONFIG_PATH)
-
-    if not cfg_path.is_file():
-        log(f"No config file at {CONFIG_PATH}, using defaults.")
-        return cfg
-
-    try:
-        user_cfg = _load_toml_file(cfg_path)
-    except Exception as e:
-        log(f"Failed to read config file {CONFIG_PATH}: {e}; using defaults.")
-        return cfg
-
-    for section, values in user_cfg.items():
-        if section in cfg and isinstance(values, dict):
-            for key, value in values.items():
-                cfg[section][key] = value
-
-    return cfg
-
-
-WATCHER_CONFIG = load_config().get("watcher", {})
-AUTO_CLONE = bool(WATCHER_CONFIG.get("auto_clone_missing_repos", True))
-GIT_DEFAULT_OWNER = WATCHER_CONFIG.get("git_default_owner") or None
-GIT_DEFAULT_HOST = WATCHER_CONFIG.get("git_default_host") or "github.com"
-GIT_PROTOCOL = WATCHER_CONFIG.get("git_protocol", "ssh")
-CLEANUP_NON_GIT_DIRS = bool(WATCHER_CONFIG.get("cleanup_non_git_dirs", False))
-
-
-# --- Path + branch helpers --------------------------------------------------
-
-
-def _split_inbox_path(path: str) -> Optional[tuple[str, str, str]]:
+def prepare_branch(ctx: JobContext) -> None:
     """
-    Given an absolute path under INBOX_DIR, return (repo_key, branch, job_name).
+    Ensure the base branch exists and create a job-specific branch:
 
-    Example:
-        /srv/prompt-valet/inbox/crapssim/main/test.prompt.md
-        -> ("crapssim", "main", "test")
+        <job_branch> = agent/<job_id>
+
+    If the base branch doesn't exist locally, we attempt to fetch it from origin.
     """
-    inbox_root = Path(INBOX_DIR)
-    p = Path(path)
+    repo_dir = ctx.repo_dir()
+    base_branch = ctx.branch
+    job_branch = f"agent/{ctx.job_id}"
 
-    try:
-        rel = p.relative_to(inbox_root)
-    except ValueError:
-        log(f"Path {path!r} is not under INBOX_DIR {INBOX_DIR!r}, skipping.")
-        return None
+    # Ensure we have the latest data
+    git_run(["git", "fetch", "origin"], cwd=repo_dir)
 
-    parts = list(rel.parts)
-    if len(parts) < 3:
-        log(f"Path {path!r} does not look like repo/branch/file, skipping.")
-        return None
-
-    repo_key = parts[0]
-    branch = parts[1]
-    filename = parts[-1]
-
-    if not filename.endswith(".prompt.md"):
-        log(f"File {filename!r} does not end with .prompt.md, skipping.")
-        return None
-
-    job = filename[: -len(".prompt.md")]
-    return repo_key, branch, job
-
-
-def make_branch_slug(job: str) -> str:
-    """
-    Turn an arbitrary job name into a git-safe slug.
-
-    Rules:
-        - Trim whitespace
-        - Replace spaces with '-'
-        - Replace obvious bad chars (/ : @ ~ ^ \ ..) with '-'
-        - Collapse any remaining weird chars to '-'
-        - Strip leading/trailing '.' and '-'
-    """
-    slug = job.strip()
-    if not slug:
-        return "job"
-
-    # Normalize spaces first
-    slug = slug.replace(" ", "-")
-
-    # Replace path / ref separators
-    for bad in ["/", ":", "@", "~", "^", "\\"]:
-        slug = slug.replace(bad, "-")
-
-    # ".." is illegal in refnames; squash it.
-    slug = slug.replace("..", "-")
-
-    # Anything not [A-Za-z0-9._-] becomes '-'
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug)
-
-    # Trim noisy edges
-    slug = slug.strip(".-")
-
-    if not slug:
-        slug = "job"
-
-    return slug
-
-
-def _build_remote_url(repo_key: str) -> Optional[str]:
-    """
-    Build the git remote URL based on protocol and config.
-    """
-    if not GIT_DEFAULT_OWNER:
-        log(
-            "auto_clone_missing_repos is true but git_default_owner is not set; "
-            "cannot construct clone URL."
+    # Check out the base branch (or create tracking from origin)
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", base_branch],
+        cwd=str(repo_dir),
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        # Try origin/<base_branch>
+        remote_ref = f"origin/{base_branch}"
+        result2 = subprocess.run(
+            ["git", "rev-parse", "--verify", remote_ref],
+            cwd=str(repo_dir),
+            text=True,
+            capture_output=True,
         )
-        return None
-
-    if GIT_PROTOCOL == "https":
-        return f"https://{GIT_DEFAULT_HOST}/{GIT_DEFAULT_OWNER}/{repo_key}.git"
-    else:
-        return f"git@{GIT_DEFAULT_HOST}:{GIT_DEFAULT_OWNER}/{repo_key}.git"
-
-
-def _ensure_repo_present(repo_key: str) -> Optional[str]:
-    """
-    Ensure /srv/repos/<repo_key> exists and is a real git repo.
-
-    Behavior:
-        - If dir does not exist: clone it (when AUTO_CLONE is true).
-        - If dir exists and has .git: reuse it.
-        - If dir exists but has no .git:
-            - if CLEANUP_NON_GIT_DIRS: remove and treat as missing (then clone)
-            - else: log and bail.
-    """
-    repo_path = Path(REPOS_ROOT) / repo_key
-
-    if repo_path.is_dir():
-        git_dir = repo_path / ".git"
-        if git_dir.is_dir():
-            return str(repo_path)
-
-        if CLEANUP_NON_GIT_DIRS:
-            log(
-                f"{repo_path} exists but is not a git repo; "
-                "removing it because cleanup_non_git_dirs=true."
-            )
-            shutil.rmtree(repo_path)
+        if result2.returncode == 0:
+            git_run(["git", "checkout", "-b", base_branch, remote_ref], cwd=repo_dir)
         else:
-            log(
-                f"{repo_path} exists but is not a git repo; "
-                "refusing to delete automatically. "
-                "Set watcher.cleanup_non_git_dirs=true to enable auto-cleanup."
+            raise RuntimeError(
+                f"Base branch {base_branch!r} not found locally or as origin/{base_branch!r}."
             )
-            return None
+    else:
+        git_run(["git", "checkout", base_branch], cwd=repo_dir)
 
-    log(f"Repo path does not exist: {repo_path}")
-
-    if not AUTO_CLONE:
-        log("auto_clone_missing_repos is false; not attempting clone.")
-        return None
-
-    remote = _build_remote_url(repo_key)
-    if not remote:
-        return None
-
-    log(f"Attempting to auto-clone missing repo from {remote!r} into {repo_path}")
-    repo_path.parent.mkdir(parents=True, exist_ok=True)
-
-    try:
-        run(["git", "clone", remote, str(repo_path)], cwd=str(repo_path.parent))
-    except RuntimeError as e:
-        log(f"Auto-clone failed for {repo_key}: {e}")
-        return None
-
-    if repo_path.is_dir() and (repo_path / ".git").is_dir():
-        log(f"Auto-clone succeeded for repo {repo_key}, path {repo_path}")
-        return str(repo_path)
-
-    log(f"Repo directory {repo_path} still missing or not a git repo after clone attempt.")
-    return None
+    # Create the job branch from the base branch
+    git_run(["git", "checkout", "-b", job_branch], cwd=repo_dir)
 
 
-# --- Core processing --------------------------------------------------------
+def run_codex(ctx: JobContext, cfg: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Run Codex against the repo using the prompt file.
+    """
+    watcher_cfg = cfg.get("watcher", {})
+    runner_cmd = watcher_cfg.get("codex_runner_cmd", DEFAULT_RUNNER_CMD)
+    model = watcher_cfg.get("codex_model", DEFAULT_MODEL)
+    sandbox = watcher_cfg.get("codex_sandbox", DEFAULT_SANDBOX)
 
+    repo_dir = ctx.repo_dir()
+    prompt_content: str
 
-def process_prompt_file(path: str) -> None:
-    log(f"Detected new prompt file: {path}")
+    # Read the prompt file so we can at least guard against empty content.
+    with ctx.prompt_path.open("r", encoding="utf-8") as f:
+        prompt_content = f.read()
 
-    split = _split_inbox_path(path)
-    if split is None:
-        return
+    if not prompt_content.strip():
+        raise RuntimeError(f"Prompt file {ctx.prompt_path} is empty or whitespace; refusing to run Codex.")
 
-    repo_key, branch, job = split
-    filename = os.path.basename(path)
+    # Where Codex CLI will dump the final message for debugging/auditing
+    last_msg_dir = repo_dir / "docs" / "AGENT_RUNS"
+    last_msg_dir.mkdir(parents=True, exist_ok=True)
+    last_msg_path = last_msg_dir / f"codex-run-{time.strftime('%Y%m%d-%H%M-%S')}.md"
 
-    repo_path = _ensure_repo_present(repo_key)
-    if repo_path is None:
-        log(f"Cannot process {filename}: repo {repo_key!r} is unavailable.")
-        return
-
-    # Read prompt content
-    with open(path, "r", encoding="utf-8") as f:
-        prompt_content = f.read().strip()
-
-    if not prompt_content:
-        log(f"Prompt file is empty: {filename}, skipping.")
-        return
-
-    log(f"Processing job '{job}' for repo '{repo_key}' branch '{branch}'")
-
-    # Git dance: checkout branch + pull latest
-    run(["git", "fetch", "origin"], cwd=repo_path)
-    try:
-        run(["git", "checkout", branch], cwd=repo_path)
-    except RuntimeError as e:
-        log(f"Failed to checkout branch {branch!r} in {repo_key}: {e}")
-        return
-
-    run(["git", "pull", "origin", branch], cwd=repo_path)
-
-    # Create a new branch for this agent run
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M")  # e.g. 20251204-1336
-    suffix = secrets.token_hex(2)                   # tiny collision-avoid suffix
-    safe_job = make_branch_slug(job)
-    log(f"Sanitized job name {job!r} -> branch slug {safe_job!r}")
-    branch_name = f"agent/{safe_job}-{ts}-{suffix}"
-
-    run(["git", "checkout", "-b", branch_name], cwd=repo_path)
-
-    # Ensure docs/AGENT_RUNS exists
-    agent_runs_dir = os.path.join(repo_path, "docs", "AGENT_RUNS")
-    os.makedirs(agent_runs_dir, exist_ok=True)
-    output_file = os.path.join(agent_runs_dir, f"codex-run-{ts}-{suffix}.md")
-
-    env = os.environ.copy()
-    model = DEFAULT_MODEL
-
+    # NOTE: We now pass the **path** to the prompt file as the last argument,
+    # so codex CLI can handle the .prompt.md semantics itself (YAML front-matter,
+    # multi-part sections, etc.), instead of us unwrapping it and shoving the
+    # raw text directly into argv.
     cmd = [
-        "codex",
+        runner_cmd,
         "exec",
         "--skip-git-repo-check",
         "--cd",
-        repo_path,
+        str(repo_dir),
         "--output-last-message",
-        output_file,
+        str(last_msg_path),
         "--model",
         model,
         "--sandbox",
-        DEFAULT_SANDBOX,
-        prompt_content,
+        sandbox,
+        str(ctx.prompt_path),
     ]
-    run(cmd, env=env)
 
-    # Show status and commit whatever changed
-    run(["git", "status"], cwd=repo_path, check=False)
-    run(["git", "add", "-A"], cwd=repo_path)
-    run(["git", "commit", "-m", f"Codex agent run: {job}"], cwd=repo_path)
-
-    # Push branch
-    run(["git", "push", "origin", branch_name], cwd=repo_path)
-
-    # Create PR via gh (if available)
-    try:
-        pr_title = f"Codex agent run: {job}"
-        pr_body = (
-            f"Codex agent run for job `{job}`.\n\n"
-            f"- Repo: `{repo_key}`\n"
-            f"- Branch: `{branch_name}` (base `{branch}`)\n"
-            f"- Report file: `{os.path.relpath(output_file, repo_path)}`\n"
-        )
-        cmd_gh = [
-            "gh",
-            "pr",
-            "create",
-            "--base",
-            branch,
-            "--head",
-            branch_name,
-            "--title",
-            pr_title,
-            "--body",
-            pr_body,
-        ]
-        run(cmd_gh, cwd=repo_path)
-    except Exception as e:
-        log(f"Warning: failed to create PR with gh: {e}")
-
-    # Move processed prompt file
-    os.makedirs(PROCESSED_DIR, exist_ok=True)
-    dest = os.path.join(PROCESSED_DIR, filename)
-    shutil.move(path, dest)
-    log(f"Moved processed file to {dest}")
-    log(f"Job '{job}' complete.")
+    log(f"Running Codex: {cmd!r}")
+    result = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+    )
+    if result.stdout:
+        log(f"Codex STDOUT:\n{result.stdout.rstrip()}")
+    if result.stderr:
+        log(f"Codex STDERR:\n{result.stderr.rstrip()}")
+    if result.returncode != 0:
+        raise RuntimeError(f"Codex run failed with code {result.returncode}: {cmd!r}")
 
 
-class PromptHandler(FileSystemEventHandler):
-    def _maybe_process(self, path: str) -> None:
-        if not path.endswith(".prompt.md"):
+def commit_and_push(ctx: JobContext) -> None:
+    """
+    Commit any changes and push the job branch to origin.
+
+    NOTE: This is intentionally conservative; if there are no changes,
+    we still log what happened.
+    """
+    repo_dir = ctx.repo_dir()
+    job_branch = f"agent/{ctx.job_id}"
+
+    # Check for changes
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(repo_dir),
+        text=True,
+        capture_output=True,
+    )
+    if status.returncode != 0:
+        raise RuntimeError(f"git status failed: {status.stderr}")
+
+    if not status.stdout.strip():
+        log(f"No changes detected in {repo_dir}; nothing to commit for job {ctx.job_id!r}.")
+        return
+
+    git_run(["git", "add", "-A"], cwd=repo_dir)
+    git_run(["git", "commit", "-m", f"Prompt Valet job {ctx.job_id}"], cwd=repo_dir)
+    git_run(["git", "push", "-u", "origin", job_branch], cwd=repo_dir)
+    log(f"Pushed branch {job_branch!r} for repo {ctx.repo_key!r}.")
+
+
+def move_to_processed(ctx: JobContext) -> None:
+    """
+    Move the prompt file to the processed/ tree, mirroring the inbox structure.
+    """
+    dst = ctx.processed_prompt_path()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(ctx.prompt_path), str(dst))
+    log(f"Moved prompt file to processed: {dst}")
+
+
+def process_prompt_file(path: Path, cfg: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Main job handler for a single prompt file.
+    """
+    inbox_root = Path(cfg["watcher"].get("inbox_dir", str(DEFAULT_INBOX_DIR)))
+    processed_root = Path(cfg["watcher"].get("processed_dir", str(DEFAULT_PROCESSED_DIR)))
+
+    ctx = parse_prompt_path(inbox_root, path)
+    if ctx is None:
+        log(f"Path {path!r} does not look like repo/branch/file, skipping.")
+        return
+
+    # Update context with processed_dir from config
+    ctx.processed_dir = processed_root
+
+    log(f"Processing job {ctx.job_id!r} for repo {ctx.repo_key!r} branch {ctx.branch!r}")
+
+    # Ensure repo is cloned / updated
+    ensure_repo_cloned(ctx, cfg)
+
+    # Prepare job branch
+    prepare_branch(ctx)
+
+    # Run Codex on this repo + prompt
+    run_codex(ctx, cfg)
+
+    # Commit, push, etc. (current implementation: commit & push only)
+    commit_and_push(ctx)
+
+    # Move prompt into processed tree
+    move_to_processed(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Watchdog handler & worker thread
+# ---------------------------------------------------------------------------
+
+
+class PromptEventHandler(FileSystemEventHandler):
+    """
+    Watchdog handler that reacts to *.prompt.md files appearing in the inbox.
+    """
+
+    def __init__(self, inbox_root: Path, job_queue: "queue.Queue[Path]") -> None:
+        super().__init__()
+        self.inbox_root = inbox_root
+        self.job_queue = job_queue
+
+    def _maybe_queue_path(self, path: Path) -> None:
+        if not path.name.endswith(".prompt.md"):
             return
-        time.sleep(1.0)  # let uploads finish
+        # Only queue files that actually live under the inbox root
         try:
-            process_prompt_file(path)
+            path.relative_to(self.inbox_root)
+        except ValueError:
+            return
+        log(f"Detected new prompt file: {path}")
+        self.job_queue.put(path)
+
+    def on_created(self, event) -> None:  # type: ignore[override]
+        if isinstance(event, FileCreatedEvent):
+            self._maybe_queue_path(Path(event.src_path))
+
+    def on_moved(self, event) -> None:  # type: ignore[override]
+        if isinstance(event, FileMovedEvent):
+            self._maybe_queue_path(Path(event.dest_path))
+
+
+def worker_loop(job_queue: "queue.Queue[Path]", cfg: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Worker thread: process prompt files sequentially.
+    """
+    while True:
+        path = job_queue.get()
+        if path is None:  # Sentinel for shutdown (not currently used)
+            break
+        try:
+            process_prompt_file(path, cfg)
         except Exception as e:
             log(f"Error processing {path}: {e}")
-
-    def on_created(self, event):
-        if event.is_directory:
-            return
-        log(f"on_created event for {event.src_path}")
-        self._maybe_process(event.src_path)
-
-    def on_moved(self, event):
-        if event.is_directory:
-            return
-        log(f"on_moved event from {event.src_path} to {event.dest_path}")
-        self._maybe_process(event.dest_path)
+        finally:
+            job_queue.task_done()
 
 
-def main():
-    log(f"Starting Codex watcher on {INBOX_DIR}")
-    os.makedirs(INBOX_DIR, exist_ok=True)
-    os.makedirs(PROCESSED_DIR, exist_ok=True)
+# ---------------------------------------------------------------------------
+# Main entrypoint
+# ---------------------------------------------------------------------------
 
-    event_handler = PromptHandler()
+
+def main() -> None:
+    cfg, source_label = load_config()
+    watcher_cfg = cfg.get("watcher", {})
+
+    inbox_dir = Path(watcher_cfg.get("inbox_dir", str(DEFAULT_INBOX_DIR)))
+    processed_dir = Path(watcher_cfg.get("processed_dir", str(DEFAULT_PROCESSED_DIR)))
+    git_owner = watcher_cfg.get("git_default_owner")
+    git_host = watcher_cfg.get("git_default_host", "github.com")
+    git_proto = watcher_cfg.get("git_protocol", "https")
+    runner_cmd = watcher_cfg.get("codex_runner_cmd", DEFAULT_RUNNER_CMD)
+
+    # Ensure directories exist (or at least the inbox root)
+    os.makedirs(inbox_dir, exist_ok=True)
+    os.makedirs(processed_dir, exist_ok=True)
+
+    # Unified startup log line (mirrors rebuild_inbox_tree.py)
+    log(
+        f"[prompt-valet] loaded config={source_label} "
+        f"inbox={inbox_dir} processed={processed_dir} "
+        f"git_owner={git_owner} git_host={git_host} git_protocol={git_proto} "
+        f"runner={runner_cmd}"
+    )
+
+    job_queue: "queue.Queue[Path]" = queue.Queue()
+
+    # Start worker thread
+    worker = threading.Thread(target=worker_loop, args=(job_queue, cfg), daemon=True)
+    worker.start()
+
+    # Start watchdog observer
+    event_handler = PromptEventHandler(inbox_dir, job_queue)
     observer = Observer()
-    observer.schedule(event_handler, INBOX_DIR, recursive=True)
-    log(f"Observer scheduled on {INBOX_DIR} (recursive=True)")
+    observer.schedule(event_handler, str(inbox_dir), recursive=True)
     observer.start()
+
+    log(f"Starting Codex watcher on {inbox_dir}")
 
     try:
         while True:
-            time.sleep(1)
+            time.sleep(1.0)
     except KeyboardInterrupt:
-        log("Stopping watcher...")
+        log("Shutting down on KeyboardInterrupt")
+    finally:
         observer.stop()
-    observer.join()
+        observer.join()
 
 
 if __name__ == "__main__":
