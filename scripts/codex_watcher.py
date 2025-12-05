@@ -2,11 +2,11 @@
 """
 codex_watcher.py
 
-Watches the Copyparty inbox and runs Codex on any *.prompt.md files.
+Watches the Prompt Valet inbox and runs Codex on any *.prompt.md files.
 
 Layout:
 
-    /srv/copyparty/inbox/<repo>/<branch>/<job>.prompt.md
+    /srv/prompt-valet/inbox/<repo>/<branch>/<job>.prompt.md
 
 Repo mapping:
 
@@ -41,8 +41,8 @@ from typing import Any, Dict, Optional
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-INBOX_DIR = "/srv/copyparty/inbox"
-PROCESSED_DIR = "/srv/copyparty/processed"
+INBOX_DIR = "/srv/prompt-valet/inbox"
+PROCESSED_DIR = "/srv/prompt-valet/processed"
 REPOS_ROOT = "/srv/repos"
 CONFIG_PATH = "/etc/codex-runner/config.toml"
 
@@ -156,7 +156,7 @@ def _split_inbox_path(path: str) -> Optional[tuple[str, str, str]]:
     Given an absolute path under INBOX_DIR, return (repo_key, branch, job_name).
 
     Example:
-        /srv/copyparty/inbox/crapssim/main/test.prompt.md
+        /srv/prompt-valet/inbox/crapssim/main/test.prompt.md
         -> ("crapssim", "main", "test")
     """
     inbox_root = Path(INBOX_DIR)
@@ -267,25 +267,6 @@ def _ensure_repo_present(repo_key: str) -> Optional[str]:
     return None
 
 
-def _sanitize_branch_segment(name: str) -> str:
-    """Return a git-safe branch path segment derived from *name*.
-
-    We normalize anything that's not [A-Za-z0-9_-] into a single dash,
-    then strip leading/trailing dashes. If the result is empty, fall
-    back to 'job'.
-    """
-    import re as _re
-
-    # Replace any run of disallowed chars with a single dash
-    cleaned = _re.sub(r"[^A-Za-z0-9_-]+", "-", name)
-    cleaned = cleaned.strip("-")
-
-    if not cleaned:
-        cleaned = "job"
-
-    return cleaned
-
-
 # --- Core processing --------------------------------------------------------
 
 
@@ -327,9 +308,7 @@ def process_prompt_file(path: str) -> None:
     # Create a new branch for this agent run
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M")  # e.g. 20251204-1336
     suffix = secrets.token_hex(2)                   # tiny collision-avoid suffix
-    safe_job = _sanitize_branch_segment(job)
-    branch_name = f"agent/{safe_job}-{ts}-{suffix}"
-    log(f"Creating agent branch {branch_name!r}")
+    branch_name = f"agent/{job}-{ts}-{suffix}"
     run(["git", "checkout", "-b", branch_name], cwd=repo_path)
 
     # Ensure docs/AGENT_RUNS exists
