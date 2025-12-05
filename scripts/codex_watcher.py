@@ -13,7 +13,7 @@ Repo mapping:
     - <repo> maps directly to /srv/repos/<repo>
     - branches must already exist on the remote (we checkout and pull them)
 
-Auto-onboarding:
+Auto-onboarding / cloning:
 
     - Config file: /etc/codex-runner/config.toml
 
@@ -30,6 +30,7 @@ Auto-onboarding:
 """
 
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -148,7 +149,7 @@ GIT_PROTOCOL = WATCHER_CONFIG.get("git_protocol", "ssh")
 CLEANUP_NON_GIT_DIRS = bool(WATCHER_CONFIG.get("cleanup_non_git_dirs", False))
 
 
-# --- Path helpers -----------------------------------------------------------
+# --- Path + branch helpers --------------------------------------------------
 
 
 def _split_inbox_path(path: str) -> Optional[tuple[str, str, str]]:
@@ -185,6 +186,43 @@ def _split_inbox_path(path: str) -> Optional[tuple[str, str, str]]:
     return repo_key, branch, job
 
 
+def make_branch_slug(job: str) -> str:
+    """
+    Turn an arbitrary job name into a git-safe slug.
+
+    Rules:
+        - Trim whitespace
+        - Replace spaces with '-'
+        - Replace obvious bad chars (/ : @ ~ ^ \ ..) with '-'
+        - Collapse any remaining weird chars to '-'
+        - Strip leading/trailing '.' and '-'
+    """
+    slug = job.strip()
+    if not slug:
+        return "job"
+
+    # Normalize spaces first
+    slug = slug.replace(" ", "-")
+
+    # Replace path / ref separators
+    for bad in ["/", ":", "@", "~", "^", "\\"]:
+        slug = slug.replace(bad, "-")
+
+    # ".." is illegal in refnames; squash it.
+    slug = slug.replace("..", "-")
+
+    # Anything not [A-Za-z0-9._-] becomes '-'
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", slug)
+
+    # Trim noisy edges
+    slug = slug.strip(".-")
+
+    if not slug:
+        slug = "job"
+
+    return slug
+
+
 def _build_remote_url(repo_key: str) -> Optional[str]:
     """
     Build the git remote URL based on protocol and config.
@@ -197,11 +235,8 @@ def _build_remote_url(repo_key: str) -> Optional[str]:
         return None
 
     if GIT_PROTOCOL == "https":
-        # Anonymous HTTPS; fine for public repos, and git will use your
-        # credential helper for pushes if needed.
         return f"https://{GIT_DEFAULT_HOST}/{GIT_DEFAULT_OWNER}/{repo_key}.git"
     else:
-        # Default: SSH
         return f"git@{GIT_DEFAULT_HOST}:{GIT_DEFAULT_OWNER}/{repo_key}.git"
 
 
@@ -221,10 +256,8 @@ def _ensure_repo_present(repo_key: str) -> Optional[str]:
     if repo_path.is_dir():
         git_dir = repo_path / ".git"
         if git_dir.is_dir():
-            # Real git repo, we're good.
             return str(repo_path)
 
-        # Exists but not a git repo: "ghost" directory case.
         if CLEANUP_NON_GIT_DIRS:
             log(
                 f"{repo_path} exists but is not a git repo; "
@@ -239,7 +272,6 @@ def _ensure_repo_present(repo_key: str) -> Optional[str]:
             )
             return None
 
-    # At this point, repo_path definitely does not exist.
     log(f"Repo path does not exist: {repo_path}")
 
     if not AUTO_CLONE:
@@ -308,7 +340,10 @@ def process_prompt_file(path: str) -> None:
     # Create a new branch for this agent run
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M")  # e.g. 20251204-1336
     suffix = secrets.token_hex(2)                   # tiny collision-avoid suffix
-    branch_name = f"agent/{job}-{ts}-{suffix}"
+    safe_job = make_branch_slug(job)
+    log(f"Sanitized job name {job!r} -> branch slug {safe_job!r}")
+    branch_name = f"agent/{safe_job}-{ts}-{suffix}"
+
     run(["git", "checkout", "-b", branch_name], cwd=repo_path)
 
     # Ensure docs/AGENT_RUNS exists
