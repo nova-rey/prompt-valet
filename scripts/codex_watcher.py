@@ -15,14 +15,14 @@ Repo mapping:
 
 Auto-onboarding / cloning:
 
-    - Config file: /etc/codex-runner/config.toml
+    - Config file: /srv/prompt-valet/config/prompt-valet.yaml
 
-        [watcher]
-        auto_clone_missing_repos = true
-        git_default_owner = "nova-rey"   # your real GitHub username
-        git_default_host  = "github.com"
-        git_protocol      = "https"      # or "ssh"
-        cleanup_non_git_dirs = true      # optional safety
+        watcher:
+          auto_clone_missing_repos: true
+          git_default_owner: "nova-rey"   # your real GitHub username
+          git_default_host: "github.com"
+          git_protocol: "https"           # or "ssh"
+          cleanup_non_git_dirs: true      # optional safety
 
     - If a prompt arrives for <repo> and /srv/repos/<repo> does not exist:
         - When auto_clone_missing_repos is true, we git-clone
@@ -39,13 +39,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import yaml
+
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 INBOX_DIR = "/srv/prompt-valet/inbox"
 PROCESSED_DIR = "/srv/prompt-valet/processed"
 REPOS_ROOT = "/srv/repos"
-CONFIG_PATH = "/etc/codex-runner/config.toml"
+DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
 
 # Codex model to use by default
 DEFAULT_MODEL = "gpt-5.1-codex-mini"
@@ -96,57 +98,46 @@ def run(cmd, cwd=None, env=None, check=True):
 # --- Config loading ---------------------------------------------------------
 
 
-def _load_toml_file(path: Path) -> Dict[str, Any]:
-    """Load a TOML file using tomllib or toml."""
-    # 1) stdlib tomllib (3.11+)
-    try:
-        import tomllib  # type: ignore[attr-defined]
-
-        with path.open("rb") as f:
-            return tomllib.load(f)
-    except Exception:
-        pass
-
-    # 2) external 'toml' package
-    try:
-        import toml  # type: ignore[import]
-
-        with path.open("r", encoding="utf-8") as f:
-            return toml.load(f)
-    except Exception:
-        pass
-
-    raise RuntimeError("No TOML parser available (need Python 3.11+ or install 'toml').")
-
-
-def load_config() -> Dict[str, Dict[str, Any]]:
+def load_config() -> tuple[Dict[str, Dict[str, Any]], str]:
     cfg: Dict[str, Dict[str, Any]] = {k: v.copy() for k, v in DEFAULT_CONFIG.items()}
-    cfg_path = Path(CONFIG_PATH)
+    cfg_path = DEFAULT_CONFIG_PATH
 
     if not cfg_path.is_file():
-        log(f"No config file at {CONFIG_PATH}, using defaults.")
-        return cfg
+        log(f"No config file at {cfg_path}, using defaults.")
+        return cfg, "<defaults>"
 
     try:
-        user_cfg = _load_toml_file(cfg_path)
+        with cfg_path.open("r", encoding="utf-8") as f:
+            user_cfg = yaml.safe_load(f) or {}
     except Exception as e:
-        log(f"Failed to read config file {CONFIG_PATH}: {e}; using defaults.")
-        return cfg
+        log(f"Failed to read config file {cfg_path}: {e}; using defaults.")
+        return cfg, "<defaults>"
 
     for section, values in user_cfg.items():
         if section in cfg and isinstance(values, dict):
             for key, value in values.items():
                 cfg[section][key] = value
 
-    return cfg
+    return cfg, str(cfg_path)
 
 
-WATCHER_CONFIG = load_config().get("watcher", {})
+CONFIG, CONFIG_SOURCE = load_config()
+WATCHER_CONFIG = CONFIG.get("watcher", {})
 AUTO_CLONE = bool(WATCHER_CONFIG.get("auto_clone_missing_repos", True))
 GIT_DEFAULT_OWNER = WATCHER_CONFIG.get("git_default_owner") or None
 GIT_DEFAULT_HOST = WATCHER_CONFIG.get("git_default_host") or "github.com"
 GIT_PROTOCOL = WATCHER_CONFIG.get("git_protocol", "ssh")
 CLEANUP_NON_GIT_DIRS = bool(WATCHER_CONFIG.get("cleanup_non_git_dirs", False))
+
+owner_value = WATCHER_CONFIG.get("git_default_owner")
+owner_value_str = owner_value if owner_value is not None else "<none>"
+
+print(
+    "[prompt-valet] loaded config="
+    f"{CONFIG_SOURCE} inbox={INBOX_DIR} processed={PROCESSED_DIR} "
+    f"git_owner={owner_value_str} git_host={GIT_DEFAULT_HOST} "
+    f"git_protocol={GIT_PROTOCOL} runner=codex exec"
+)
 
 
 # --- Path + branch helpers --------------------------------------------------

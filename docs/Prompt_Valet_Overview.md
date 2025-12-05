@@ -20,7 +20,7 @@ Prompt Valet brings the same workflow fully on-premise:
 7. The prompt is moved to the processed directory.
 
 ## What Comes Next
-- The Phase 1 rename of `watcher.yaml` → `prompt-valet.yaml`
+- Phase 1 standardizes the YAML config at `/srv/prompt-valet/config/prompt-valet.yaml`
 - Phase 2 installer: one-shot deployment
 - Phase 3 TUI: configuration wizard and dashboard
 - Future: plugin-style extensions and service integrations

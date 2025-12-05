@@ -1,7 +1,7 @@
 # Prompt Valet — Phase 1 Roadmap (Revised)
 
 ## Phase Goal
-Standardize the filesystem and configuration layout, document the current architecture, and prepare for the upcoming rename of `watcher.yaml` → `prompt-valet.yaml`.
+Standardize the filesystem and configuration layout, document the current architecture, and confirm every component loads `/srv/prompt-valet/config/prompt-valet.yaml`.
 
 ## Checkpoints
 
@@ -19,7 +19,6 @@ Standardize the filesystem and configuration layout, document the current archit
 - No code edits; documentation only.
 
 ### P1·C2 — Config Rename (ABC)
-- Rename `watcher.yaml` → `prompt-valet.yaml`.
-- Move into canonical location (`/srv/prompt-valet/config/`).
-- Update watcher + tree-builder scripts to consume the new name.
-- Add improved logging of config path and key settings.
+- Canonical config is now `/srv/prompt-valet/config/prompt-valet.yaml`.
+- Watcher and tree-builder scripts consume that single YAML file.
+- Both scripts emit a startup log line showing the config path plus key watcher settings and directories.

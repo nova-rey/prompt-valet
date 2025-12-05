@@ -35,8 +35,8 @@ The core loop is:
 - Optional component used to provide a web interface to the inbox.
 - Isolated configuration in `copyparty.yaml`.
 
-## Canonical Paths (Phase 1 Pre-Rename State)
-These represent the **current** actual deployment before P1·C2 normalizes names:
+## Canonical Paths (Phase 1)
+These represent the **current** actual deployment:
 ```
 /srv/prompt-valet/
 
@@ -46,7 +46,7 @@ processed/
 
 config/
 
-watcher.yaml # will be renamed in P1·C2
+prompt-valet.yaml # canonical Prompt Valet runtime config (YAML)
 
 copyparty.yaml
 

@@ -33,7 +33,7 @@ A background systemd timer can run this periodically to provide
 
 Config (YAML):
 
-    /srv/prompt-valet/config/codex-runner.yaml
+    /srv/prompt-valet/config/prompt-valet.yaml
 
     tree_builder:
       # If true, also create an empty inbox root for every repo
@@ -76,7 +76,7 @@ import yaml
 # Filesystem layout
 INBOX_ROOT = Path("/srv/prompt-valet/inbox")
 REPOS_ROOT = Path("/srv/repos")
-CONFIG_PATH = Path("/srv/prompt-valet/config/codex-runner.yaml")
+DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
 
 
 def log(msg: str) -> None:
@@ -101,35 +101,39 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
         "auto_clone_missing_repos": True,
         "git_default_owner": None,
         "git_default_host": "github.com",
+        "git_protocol": "https",
+        "cleanup_non_git_dirs": False,
     },
 }
 
 
-def load_config() -> Dict[str, Dict[str, Any]]:
+def load_config() -> tuple[Dict[str, Dict[str, Any]], str]:
     """
-    Load configuration from CONFIG_PATH, shallow-merged over DEFAULT_CONFIG.
+    Load configuration from DEFAULT_CONFIG_PATH, shallow-merged over DEFAULT_CONFIG.
 
     Missing file or parse failure fall back to DEFAULT_CONFIG.
     """
     cfg: Dict[str, Dict[str, Any]] = {k: v.copy() for k, v in DEFAULT_CONFIG.items()}
 
-    if not CONFIG_PATH.is_file():
-        log(f"No config file at {CONFIG_PATH}, using defaults.")
-        return cfg
+    path = DEFAULT_CONFIG_PATH
+
+    if not path.is_file():
+        log(f"No config file at {path}, using defaults.")
+        return cfg, "<defaults>"
 
     try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf-8") as f:
             user_cfg = yaml.safe_load(f) or {}
     except Exception as e:
-        log(f"Failed to read config file {CONFIG_PATH}: {e}; using defaults.")
-        return cfg
+        log(f"Failed to read config file {path}: {e}; using defaults.")
+        return cfg, "<defaults>"
 
     for section, values in user_cfg.items():
         if section in cfg and isinstance(values, dict):
             for key, value in values.items():
                 cfg[section][key] = value
 
-    return cfg
+    return cfg, str(path)
 
 
 # --- Git / inbox helpers ----------------------------------------------------
@@ -410,7 +414,21 @@ def clean_inbox_roots() -> None:
 
 
 def main() -> None:
-    cfg = load_config()
+    cfg, config_source = load_config()
+    watcher_cfg = cfg.get("watcher", {})
+    git_owner = watcher_cfg.get("git_default_owner")
+    git_owner_str = git_owner if git_owner is not None else "<none>"
+    git_host = watcher_cfg.get("git_default_host", "github.com")
+    git_protocol = watcher_cfg.get("git_protocol", "https")
+
+    print(
+        f"[prompt-valet] loaded config={config_source} "
+        f"inbox={INBOX_ROOT} processed=<n/a> "
+        f"git_owner={git_owner_str} git_host={git_host} "
+        f"git_protocol={git_protocol} runner=<none>"
+    )
+
+    tb_cfg = cfg.get("tree_builder", {})
     tb_cfg = cfg.get("tree_builder", {})
     eager_repos = bool(tb_cfg.get("eager_repos", False))
 

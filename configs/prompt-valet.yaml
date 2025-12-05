@@ -1,5 +1,5 @@
-# codex-runner.yaml
-# Config for Codex watcher + inbox tree builder.
+# prompt-valet.yaml
+# Config for Prompt Valet watcher + inbox tree builder (canonical YAML at /srv/prompt-valet/config/prompt-valet.yaml).
 
 tree_builder:
   # When true, also pre-create inbox folders for all repos/branches
