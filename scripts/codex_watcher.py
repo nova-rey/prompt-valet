@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 codex_watcher.py
@@ -264,10 +263,27 @@ def _ensure_repo_present(repo_key: str) -> Optional[str]:
         log(f"Auto-clone succeeded for repo {repo_key}, path {repo_path}")
         return str(repo_path)
 
-    log(
-        f"Repo directory {repo_path} still missing or not a git repo after clone attempt."
-    )
+    log(f"Repo directory {repo_path} still missing or not a git repo after clone attempt.")
     return None
+
+
+def _sanitize_branch_segment(name: str) -> str:
+    """Return a git-safe branch path segment derived from *name*.
+
+    We normalize anything that's not [A-Za-z0-9_-] into a single dash,
+    then strip leading/trailing dashes. If the result is empty, fall
+    back to 'job'.
+    """
+    import re as _re
+
+    # Replace any run of disallowed chars with a single dash
+    cleaned = _re.sub(r"[^A-Za-z0-9_-]+", "-", name)
+    cleaned = cleaned.strip("-")
+
+    if not cleaned:
+        cleaned = "job"
+
+    return cleaned
 
 
 # --- Core processing --------------------------------------------------------
@@ -311,7 +327,9 @@ def process_prompt_file(path: str) -> None:
     # Create a new branch for this agent run
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M")  # e.g. 20251204-1336
     suffix = secrets.token_hex(2)                   # tiny collision-avoid suffix
-    branch_name = f"agent/{job}-{ts}-{suffix}"
+    safe_job = _sanitize_branch_segment(job)
+    branch_name = f"agent/{safe_job}-{ts}-{suffix}"
+    log(f"Creating agent branch {branch_name!r}")
     run(["git", "checkout", "-b", branch_name], cwd=repo_path)
 
     # Ensure docs/AGENT_RUNS exists
@@ -393,33 +411,13 @@ class PromptHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory:
             return
-
-        # Ignore temporary partial uploads (Copyparty .PARTIAL files)
-        if event.src_path.endswith(".PARTIAL"):
-            log(f"on_created (partial upload, ignoring) for {event.src_path}")
-            return
-
         log(f"on_created event for {event.src_path}")
         self._maybe_process(event.src_path)
 
     def on_moved(self, event):
         if event.is_directory:
             return
-
-        # If destination is still a PARTIAL file, it's not done yet.
-        if event.dest_path.endswith(".PARTIAL"):
-            log(
-                f"on_moved (still partial, ignoring) "
-                f"from {event.src_path} to {event.dest_path}"
-            )
-            return
-
-        # Common case: .PARTIAL -> real file
-        if event.src_path.endswith(".PARTIAL"):
-            log(f"on_moved (finalizing upload) to {event.dest_path}")
-        else:
-            log(f"on_moved event from {event.src_path} to {event.dest_path}")
-
+        log(f"on_moved event from {event.src_path} to {event.dest_path}")
         self._maybe_process(event.dest_path)
 
 
