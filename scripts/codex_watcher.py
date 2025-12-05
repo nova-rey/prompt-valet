@@ -149,7 +149,7 @@ def prepare_branch(
     - Checks out and fast-forwards base_branch.
     - Creates (or reuses + resets) job_branch from base_branch.
     """
-    # Ensure repo exists & has remotes
+    # Ensure repo exists & has remotes (non-fatal if this fails)
     git_run(["remote", "-v"], cwd=repo_dir, allow_failure=True)
 
     # Fetch latest and get onto base branch
@@ -162,7 +162,7 @@ def prepare_branch(
     # crashed after creating it), reuse it but hard-reset it to the base
     # branch so we always start clean.
     try:
-        git_run(["git", "checkout", "-b", job_branch], cwd=repo_dir)
+        git_run(["checkout", "-b", job_branch], cwd=repo_dir)
     except RuntimeError as exc:
         msg = str(exc)
         if "already exists" in msg:
@@ -170,11 +170,9 @@ def prepare_branch(
                 f"Branch {job_branch!r} already exists; reusing it and resetting "
                 f"to {base_branch!r}."
             )
-            # Check out the existing branch and reset it to the base commit.
-            git_run(["git", "checkout", job_branch], cwd=repo_dir)
-            git_run(["git", "reset", "--hard", base_branch], cwd=repo_dir)
+            git_run(["checkout", job_branch], cwd=repo_dir)
+            git_run(["reset", "--hard", base_branch], cwd=repo_dir)
         else:
-            # Different failure; bubble it up so the caller sees it.
             raise
 
 
