@@ -115,24 +115,27 @@ def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.Complete
     return proc
 
 
-def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
+def resolve_prompt_repo(
+    config: dict, prompt_path: str
+) -> Tuple[str, str, str, Path, Path]:
     """
-    Given the config and the full path to a prompt file under the inbox tree,
-    derive the corresponding git repo root based on the configured inbox_mode.
+    Resolve a prompt path under the inbox root into:
 
-    Supported modes:
+        (owner, repo_name, branch_name, repo_root, rel_path)
 
-        - legacy_single_owner:
-            inbox layout: <repo>/<branch>/.../<file>
-            owner is taken from config['git_owner'].
+    Behavior depends on config["inbox_mode"]:
 
-        - multi_owner:
-            inbox layout: <owner>/<repo>/<branch>/.../<file>
-            owner is the first path segment.
+    - legacy_single_owner:
+        inbox layout: <repo>/<branch>/.../<file>
+        owner is taken from config["git_owner"].
 
-    Repo root is always:
+    - multi_owner:
+        inbox layout: <owner>/<repo>/<branch>/.../<file>
+        owner is the first segment.
 
-        repos_root/<owner>/<repo>
+    The repo_root is always:
+
+        repos_root/<owner>/<repo_name>
     """
     inbox_root = Path(config["inbox"]).expanduser().resolve()
     repos_root = Path(config["repos_root"]).expanduser().resolve()
@@ -140,7 +143,12 @@ def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
     mode = config.get("inbox_mode", "legacy_single_owner")
 
     prompt = Path(prompt_path).expanduser().resolve()
-    rel = prompt.relative_to(inbox_root)
+    try:
+        rel = prompt.relative_to(inbox_root)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Prompt path {prompt} is not under inbox root {inbox_root}"
+        ) from exc
     parts = rel.parts
 
     if mode == "legacy_single_owner":
@@ -160,6 +168,7 @@ def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
 
         owner = git_owner
         repo_name = parts[0]
+        branch_name = parts[1]
 
     elif mode == "multi_owner":
         # Expect at least <owner>/<repo>/<branch>/.../<file>
@@ -171,6 +180,7 @@ def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
 
         owner = parts[0]
         repo_name = parts[1]
+        branch_name = parts[2]
 
     else:
         raise RuntimeError(
@@ -179,6 +189,15 @@ def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
         )
 
     repo_root = repos_root / owner / repo_name
+    return owner, repo_name, branch_name, repo_root, rel
+
+
+def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
+    """
+    Backwards-compatible helper used by tests and callers that only care about
+    the repo root path. Delegates to resolve_prompt_repo().
+    """
+    _, _, _, repo_root, _ = resolve_prompt_repo(config, prompt_path)
     return repo_root
 
 
@@ -300,6 +319,22 @@ def run_git_sync(repo_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    watcher_cfg = cfg.get("watcher", {})
+
+    # Normalize top-level keys from watcher section for backwards compatibility.
+    if "git_owner" not in cfg and "git_default_owner" in watcher_cfg:
+        cfg["git_owner"] = watcher_cfg["git_default_owner"]
+
+    if "git_host" not in cfg and "git_default_host" in watcher_cfg:
+        cfg["git_host"] = watcher_cfg["git_default_host"]
+
+    if "inbox_mode" not in cfg and "inbox_mode" in watcher_cfg:
+        cfg["inbox_mode"] = watcher_cfg["inbox_mode"]
+
+    return cfg
+
+
 def load_config() -> Dict[str, Any]:
     cfg = DEFAULT_CONFIG.copy()
     path = DEFAULT_CONFIG_PATH
@@ -327,6 +362,8 @@ def load_config() -> Dict[str, Any]:
             )
             loaded_path = "<defaults>"
 
+    cfg = normalize_config(cfg)
+
     inbox_root = Path(cfg["inbox"])
     processed_root = Path(cfg["processed"])
     repos_root = Path(cfg["repos_root"])
@@ -338,13 +375,24 @@ def load_config() -> Dict[str, Any]:
         f"inbox={inbox_root} "
         f"processed={processed_root} "
         f"repos_root={repos_root} "
-        f"git_owner={watcher_cfg.get('git_default_owner')} "
-        f"git_host={watcher_cfg.get('git_default_host')} "
+        f"git_owner={cfg.get('git_owner')} "
+        f"git_host={cfg.get('git_host')} "
         f"git_protocol={watcher_cfg.get('git_protocol')} "
         f"runner={watcher_cfg.get('runner_cmd')}"
     )
 
     return cfg
+
+
+def load_config_from_dict(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize an existing config dict (primarily for tests)."""
+    normalized = DEFAULT_CONFIG.copy()
+    for key, value in cfg.items():
+        if isinstance(value, dict) and isinstance(normalized.get(key), dict):
+            normalized[key].update(value)  # type: ignore[arg-type]
+        else:
+            normalized[key] = value
+    return normalize_config(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -375,30 +423,15 @@ class InboxHandler(FileSystemEventHandler):
             return
 
         try:
-            rel = path.relative_to(self.inbox_root)
-        except ValueError:
-            # Not actually under the inbox; ignore
-            return
-
-        try:
-            _ = derive_repo_root_from_prompt(CONFIG, str(path))
+            git_owner, repo_name, branch_name, _, _ = resolve_prompt_repo(
+                CONFIG, str(path)
+            )
         except RuntimeError as exc:
             print(
                 f"[codex_watcher] Skipping prompt {path}: "
                 f"unable to derive repo root ({exc})."
             )
             return
-
-        mode = INBOX_MODE
-        parts = list(rel.parts)
-        if mode == "legacy_single_owner":
-            git_owner = CONFIG.get("git_owner", "")
-            repo_name = parts[0]
-            branch_name = parts[1]
-        else:
-            git_owner = parts[0]
-            repo_name = parts[1]
-            branch_name = parts[2]
 
         job = Job(
             git_owner=git_owner,
@@ -589,30 +622,19 @@ def main(argv: Optional[list] = None) -> int:
     if args.once:
         # Simple scan and exit: enqueue any existing *.prompt.md files
         for path in inbox_root.rglob("*.prompt.md"):
-            try:
-                rel = path.relative_to(inbox_root)
-            except ValueError:
+            if not path.is_file():
                 continue
 
             try:
-                _ = derive_repo_root_from_prompt(CONFIG, str(path))
+                git_owner, repo_name, branch_name, _, _ = resolve_prompt_repo(
+                    CONFIG, str(path)
+                )
             except RuntimeError as exc:
                 print(
                     f"[codex_watcher] Skipping prompt {path}: "
                     f"unable to derive repo root ({exc})."
                 )
                 continue
-
-            parts = list(rel.parts)
-            mode = INBOX_MODE
-            if mode == "legacy_single_owner":
-                git_owner, repo_name, branch_name = (
-                    CONFIG.get("git_owner", ""),
-                    parts[0],
-                    parts[1],
-                )
-            else:
-                git_owner, repo_name, branch_name = parts[0], parts[1], parts[2]
 
             job_queue.put(Job(git_owner, repo_name, branch_name, path))
 

@@ -10,28 +10,36 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts import codex_watcher
 
 
-def test_derive_repo_root_legacy_single_owner(tmp_path):
+def make_config(inbox_root: Path, repos_root: Path, mode: str) -> dict:
+    cfg = {
+        "inbox": str(inbox_root),
+        "processed": str(inbox_root / "_processed"),
+        "repos_root": str(repos_root),
+        "inbox_mode": mode,
+        "watcher": {
+            "git_default_owner": "nova-rey",
+            "git_default_host": "github.com",
+            "git_protocol": "https",
+        },
+    }
+    return codex_watcher.load_config_from_dict(cfg)
+
+
+def test_legacy_single_owner_resolves_repo_with_default_owner(tmp_path):
     inbox_root = tmp_path / "inbox"
     repos_root = tmp_path / "repos"
-    owner = "nova-rey"
     repo_name = "prompt-valet"
 
     prompt_path = inbox_root / repo_name / "main" / "P1c2-b.prompt.md"
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text("# dummy prompt")
 
-    config = {
-        "inbox": str(inbox_root),
-        "repos_root": str(repos_root),
-        "git_owner": owner,
-        "inbox_mode": "legacy_single_owner",
-    }
-
-    repo_root = codex_watcher.derive_repo_root_from_prompt(config, str(prompt_path))
-    assert repo_root == repos_root / owner / repo_name
+    cfg = make_config(inbox_root, repos_root, mode="legacy_single_owner")
+    repo_root = codex_watcher.derive_repo_root_from_prompt(cfg, str(prompt_path))
+    assert repo_root == repos_root / "nova-rey" / repo_name
 
 
-def test_derive_repo_root_multi_owner(tmp_path):
+def test_multi_owner_resolves_repo_from_inbox_path(tmp_path):
     inbox_root = tmp_path / "inbox"
     repos_root = tmp_path / "repos"
     owner = "nova-rey"
@@ -41,13 +49,8 @@ def test_derive_repo_root_multi_owner(tmp_path):
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text("# dummy prompt")
 
-    config = {
-        "inbox": str(inbox_root),
-        "repos_root": str(repos_root),
-        "inbox_mode": "multi_owner",
-    }
-
-    repo_root = codex_watcher.derive_repo_root_from_prompt(config, str(prompt_path))
+    cfg = make_config(inbox_root, repos_root, mode="multi_owner")
+    _, _, _, repo_root, _ = codex_watcher.resolve_prompt_repo(cfg, str(prompt_path))
     assert repo_root == repos_root / owner / repo_name
 
 
@@ -59,15 +62,10 @@ def test_derive_repo_root_legacy_rejects_too_short(tmp_path):
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text("# dummy prompt")
 
-    config = {
-        "inbox": str(inbox_root),
-        "repos_root": str(repos_root),
-        "git_owner": "nova-rey",
-        "inbox_mode": "legacy_single_owner",
-    }
+    cfg = make_config(inbox_root, repos_root, mode="legacy_single_owner")
 
     with pytest.raises(RuntimeError):
-        codex_watcher.derive_repo_root_from_prompt(config, str(prompt_path))
+        codex_watcher.derive_repo_root_from_prompt(cfg, str(prompt_path))
 
 
 def test_derive_repo_root_multi_owner_rejects_too_short(tmp_path):
@@ -78,11 +76,7 @@ def test_derive_repo_root_multi_owner_rejects_too_short(tmp_path):
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     prompt_path.write_text("# dummy prompt")
 
-    config = {
-        "inbox": str(inbox_root),
-        "repos_root": str(repos_root),
-        "inbox_mode": "multi_owner",
-    }
+    cfg = make_config(inbox_root, repos_root, mode="multi_owner")
 
     with pytest.raises(RuntimeError):
-        codex_watcher.derive_repo_root_from_prompt(config, str(prompt_path))
+        codex_watcher.derive_repo_root_from_prompt(cfg, str(prompt_path))
