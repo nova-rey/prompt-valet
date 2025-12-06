@@ -43,6 +43,7 @@ except ImportError as exc:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
+REPO_PATH = Path(__file__).resolve().parent.parent
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "inbox": {
@@ -173,12 +174,54 @@ def prepare_branch(
     # Fetch latest and get onto base branch
     run_git(["fetch", "origin"], cwd=repo_dir)
     run_git(["checkout", base_branch], cwd=repo_dir)
-    run_git(["pull", "origin", base_branch], cwd=repo_dir)
+    run_git(["reset", "--hard", f"origin/{base_branch}"], cwd=repo_dir)
+    run_git(["clean", "-fd"], cwd=repo_dir)
 
     if job_branch == base_branch:
         return
 
     ensure_agent_branch(repo_dir, job_branch)
+
+
+# ---------------------------------------------------------------------------
+# Pre-execution Git sync (Solution C)
+# ---------------------------------------------------------------------------
+
+
+def run_git_sync(repo_path: Path) -> None:
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin"],
+            cwd=repo_path,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        subprocess.run(
+            ["git", "reset", "--hard", "origin/main"],
+            cwd=repo_path,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        subprocess.run(
+            ["git", "clean", "-fd"],
+            cwd=repo_path,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        print(
+            "[codex_watcher] Repository synchronized (fetch + reset --hard origin/main)."
+        )
+
+    except subprocess.CalledProcessError as e:  # pragma: no cover - requires git failure
+        print("[codex_watcher] ERROR: Git synchronization failed.")
+        print(e.stderr.decode() if hasattr(e, "stderr") else str(e))
+        raise RuntimeError("Git synchronization failed; aborting prompt execution.")
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +494,12 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
 
     CONFIG = load_config()
+
+    try:
+        run_git_sync(REPO_PATH)
+    except RuntimeError as exc:
+        log(str(exc))
+        return 1
 
     inbox_root = Path(CONFIG["inbox"]["root"])
     processed_root = Path(CONFIG["inbox"]["processed_root"])
