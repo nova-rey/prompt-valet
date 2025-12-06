@@ -53,11 +53,12 @@ These units will be documented more fully in Phase 2.
 - After branch creation, optional `eager_repos` mode can ensure empty inbox roots exist for every repo; then `clean_inbox_branches()` and `clean_inbox_roots()` remove stale branch folders (writing `ERROR.md` markers) and orphaned repo roots that have no counterpart under `/srv/repos/`.
 - Control is linear: load config → build directories → clean extras, with helper functions isolating git discovery, filtering, and path cleanup.
 
-### Pre-Execution Git Synchronization
+### Codex Worker Repository Hygiene
 
-Before processing prompts, `codex_watcher` now performs an unconditional Git sync of its own working tree:
+The Codex worker clone on the runner is ephemeral. Codex runs always start from a clean checkout of the configured branch. If the watcher detects a dirty working tree, it automatically performs:
 
-1. `git fetch origin`
-2. `git reset --hard origin/main`
+1. `git fetch --prune`
+2. `git reset --hard origin/<branch>`
+3. `git clean -fdx`
 
-This guarantees the watcher starts from a clean, up-to-date state and avoids merge conflicts caused by local modifications. Untracked and modified files are removed during the reset process so prompt runs are reproducible.
+This guarantees that each run executes against a known-good state and prevents stale or manual changes from breaking automation.

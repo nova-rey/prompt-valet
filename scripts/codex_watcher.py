@@ -120,55 +120,6 @@ def _run_git(
     return proc
 
 
-def ensure_repo_clean_and_synced(repo_path: Path, logger: logging.Logger) -> bool:
-    """Ensure the git repo is clean and up to date before running Codex.
-
-    Returns True if it is safe to proceed. Returns False and logs an error
-    if the working tree is dirty or cannot fast–forward to origin.
-    """
-
-    status = _run_git(["status", "--porcelain"], cwd=repo_path, logger=logger)
-    if status.returncode != 0:
-        logger.error(
-            "Refusing to run Codex: `git status` failed in %s. "
-            "Resolve the git state manually before rerunning.",
-            repo_path,
-        )
-        return False
-
-    if status.stdout.strip():
-        logger.error(
-            "Refusing to run Codex: repository %s has local changes or untracked files.\n"
-            "Resolve or commit them before the watcher runs.\n"
-            "Hint: run `git status` in %s.",
-            repo_path,
-            repo_path,
-        )
-        return False
-
-    fetch = _run_git(["fetch", "origin"], cwd=repo_path, logger=logger)
-    if fetch.returncode != 0:
-        logger.error(
-            "Refusing to run Codex: `git fetch origin` failed in %s. "
-            "Check network and remote configuration.",
-            repo_path,
-        )
-        return False
-
-    pull = _run_git(["pull", "--ff-only"], cwd=repo_path, logger=logger)
-    if pull.returncode != 0:
-        logger.error(
-            "Refusing to run Codex: `git pull --ff-only` failed in %s. "
-            "The branch likely cannot fast–forward. Manually resolve the "
-            "divergence before enabling the watcher.",
-            repo_path,
-        )
-        return False
-
-    logger.info("Git preflight OK: %s is clean and up to date.", repo_path)
-    return True
-
-
 def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.CompletedProcess:
     """
     Run a git command, logging stdout/stderr.
@@ -199,6 +150,94 @@ def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.Complete
             err_msg += f" stderr: {proc.stderr.rstrip()}"
         raise RuntimeError(err_msg)
     return proc
+
+
+def ensure_worker_repo_clean_and_synced(
+    repo_path: Path, branch: str, logger: logging.Logger
+) -> bool:
+    """Ensure the worker repo is usable before running Codex.
+
+    The worker repo is treated as disposable; if it is dirty, we reset/clean it
+    and continue rather than failing the job.
+    """
+
+    git_dir = repo_path / ".git"
+
+    def _reclone_missing_repo() -> bool:
+        if repo_path.exists() and not git_dir.is_dir():
+            logger.info(
+                "Git preflight: repository at %s is not a git repo; replacing it.",
+                repo_path,
+            )
+            shutil.rmtree(repo_path)
+        try:
+            ensure_repo_cloned(repo_path.parent.parent, repo_path.parent.name, repo_path.name)
+        except Exception:
+            logger.exception(
+                "Git preflight: failed to clone worker repo at %s; skipping Codex run.",
+                repo_path,
+            )
+            return False
+        return True
+
+    def _reset_and_clean() -> bool:
+        logger.info(
+            "Git preflight: repo dirty; performing reset --hard origin/%s and git clean -fdx.",
+            branch,
+        )
+        for args in (
+            ["fetch", "--prune"],
+            ["reset", "--hard", f"origin/{branch}"],
+            ["clean", "-fdx"],
+        ):
+            proc = _run_git(args, cwd=repo_path, logger=logger)
+            if proc.returncode != 0:
+                logger.error(
+                    "Git preflight: command failed (rc=%s): git %s\nstderr:\n%s",
+                    proc.returncode,
+                    " ".join(args),
+                    proc.stderr.strip(),
+                )
+                return False
+        return True
+
+    if not git_dir.is_dir():
+        if not _reclone_missing_repo():
+            return False
+
+    fetch = _run_git(["fetch", "--prune"], cwd=repo_path, logger=logger)
+    if fetch.returncode != 0:
+        logger.error(
+            "Git preflight: `git fetch --prune` failed in %s; skipping Codex run.",
+            repo_path,
+        )
+        return False
+
+    status = _run_git(["status", "--porcelain"], cwd=repo_path, logger=logger)
+    if status.returncode != 0:
+        logger.error(
+            "Git preflight: `git status` failed in %s; skipping Codex run.",
+            repo_path,
+        )
+        return False
+
+    if status.stdout.strip():
+        return _reset_and_clean()
+
+    pull = _run_git([
+        "pull",
+        "--rebase",
+        "--autostash",
+    ], cwd=repo_path, logger=logger)
+    if pull.returncode != 0:
+        logger.warning(
+            "Git preflight: git pull failed (rc=%s); attempting hard reset + clean.",
+            pull.returncode,
+        )
+        return _reset_and_clean()
+
+    logger.info("Git preflight: repo clean and synced; proceeding with Codex run.")
+    return True
 
 
 def resolve_prompt_repo(
@@ -786,7 +825,7 @@ def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path, run_id: str) -> 
         )
 
 
-def process_job(job: Job) -> None:
+def process_job(job: Job) -> bool:
     """
     Run a single job end-to-end:
     - make sure repo is cloned
@@ -802,14 +841,13 @@ def process_job(job: Job) -> None:
     repo_dir = derive_repo_root_from_prompt(CONFIG, str(original_prompt_path))
     repo_dir = ensure_repo_cloned(repos_root, job.git_owner, job.repo_name)
 
-    if not ensure_repo_clean_and_synced(repo_dir, logger):
+    if not ensure_worker_repo_clean_and_synced(repo_dir, job.branch_name, logger):
         logger.error(
-            "Skipping Codex run for %s because git preflight failed.",
+            "Git preflight: unrecoverable git error; skipping Codex run for %s.",
             job.prompt_path,
         )
-        raise RuntimeError("Git preflight failed; skipping Codex run.")
-
-    run_git_sync(str(repo_dir))
+        JOB_STATES.pop(_job_key(job.inbox_rel), None)
+        return False
 
     job_branch = job.branch_name
     prepare_branch(repo_dir, job_branch, base_branch="main")
@@ -840,6 +878,8 @@ def process_job(job: Job) -> None:
             "safely.\n"
         )
 
+    return True
+
 
 def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
     """
@@ -856,7 +896,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
 
         try:
             log(f"Processing job {job!r}")
-            process_job(job)
+            success = process_job(job)
         except Exception as exc:
             log(f"Error processing {job.inbox_path}: {exc!r}")
             JOB_STATES[_job_key(job.inbox_rel)] = STATUS_ERROR
@@ -867,6 +907,12 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
                 status=STATUS_ERROR,
             )
         else:
+            if not success:
+                log(
+                    "Git preflight: unrecoverable git error; leaving prompt %s in inbox for retry.",
+                    job.inbox_rel,
+                )
+                continue
             JOB_STATES[_job_key(job.inbox_rel)] = STATUS_DONE
             finalize_inbox_prompt(
                 inbox_root=inbox_root,

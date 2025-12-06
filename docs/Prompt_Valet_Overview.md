@@ -19,17 +19,15 @@ Prompt Valet brings the same workflow fully on-premise:
 6. A PR is opened on GitHub.
 7. The prompt is moved to the processed directory.
 
-### Git Safety Before Each Run
+### Worker Repository Hygiene
 
-Before Codex is allowed to edit the target repository, the watcher performs a git
-preflight check:
+The Codex runner keeps a local worker clone of each target GitHub repo on the runner host. This clone is **disposable** and treated as an implementation detail:
 
-- The working tree must be completely clean (no modified or untracked files).
-- `git fetch origin` and `git pull --ff-only` must succeed.
+- Before each run, the watcher ensures the worker repo is a clean checkout of the configured branch.
+- If the worker repo has local changes or untracked files, the watcher **automatically resets it** to `origin/<branch>` and runs `git clean -fdx` to remove any stray files.
+- If the repo cannot be repaired (e.g. Git fetch/reset fails), the run is skipped and the error is logged.
 
-If either condition fails, the watcher logs an error and skips that prompt without
-touching the repo. Fix the git state (commit, reset, or resolve divergence) and
-then re-enqueue the prompt.
+Manual edits in the worker clone are unsupported and will be overwritten. The GitHub repository is the single source of truth.
 
 ## What Comes Next
 - The Phase 1 rename of `watcher.yaml` → `prompt-valet.yaml`
