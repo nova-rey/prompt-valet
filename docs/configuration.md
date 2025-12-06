@@ -57,3 +57,35 @@ work.
 If the inbox path does not match the expected layout for the current
 `inbox_mode`, the watcher logs a clear error and skips that prompt instead of
 guessing.
+
+### Inbox, processed, and finished trees
+
+Watcher uses three top-level directories:
+
+- `inbox`  \
+  Where `.prompt.md` files are dropped for execution. The watcher will:
+
+  - Claim new prompts by renaming `xyz.prompt.md` → `xyz.running.md`.
+  - Run Codex using the `.running.md` path.
+  - After completion, rename the file to `xyz.done.md` or `xyz.error.md` and
+    then move it into `finished`.
+
+- `processed`  \
+  Per-run working directory where Codex output, logs, and PR artifacts are stored.
+
+- `finished`  \
+  Archive of completed prompts. The layout mirrors `inbox`:
+
+  ```text
+  finished/<repo>/<branch>/<filename>.(done|error).md
+  ```
+
+The default paths are:
+
+- inbox: /srv/prompt-valet/inbox
+- processed: /srv/prompt-valet/processed
+- finished: /srv/prompt-valet/finished
+
+Watcher only treats *.prompt.md as new jobs. Files with .running.md,
+.done.md, or .error.md suffixes are considered status markers and will
+not be re-enqueued.

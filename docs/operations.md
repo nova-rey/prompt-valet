@@ -48,3 +48,18 @@ Watcher can operate in two modes for inbox → repo resolution, controlled by `i
   ```
 
 If a prompt path does not match the expected shape for the active mode, watcher logs the reason and skips the file rather than attempting a best-effort guess.
+
+### Prompt job status in the inbox
+
+As prompts move through the pipeline, their filenames reflect the current status:
+
+- `xyz.prompt.md` — *queued*: the watcher has seen the file but has not yet
+  claimed it.
+- `xyz.running.md` — *in progress*: Codex is currently processing the job.
+- `xyz.done.md` — *completed successfully*; after a short delay, the file is
+  moved under `finished/`.
+- `xyz.error.md` — *failed*; see the corresponding run directory under
+  `processed/` for logs and details. After a short delay, the file is moved
+  under `finished/`.
+
+Only `.prompt.md` files are treated as new jobs; status files are never re-run.
