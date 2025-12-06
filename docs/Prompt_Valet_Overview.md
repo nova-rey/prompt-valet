@@ -19,6 +19,18 @@ Prompt Valet brings the same workflow fully on-premise:
 6. A PR is opened on GitHub.
 7. The prompt is moved to the processed directory.
 
+### Git Safety Before Each Run
+
+Before Codex is allowed to edit the target repository, the watcher performs a git
+preflight check:
+
+- The working tree must be completely clean (no modified or untracked files).
+- `git fetch origin` and `git pull --ff-only` must succeed.
+
+If either condition fails, the watcher logs an error and skips that prompt without
+touching the repo. Fix the git state (commit, reset, or resolve divergence) and
+then re-enqueue the prompt.
+
 ## What Comes Next
 - The Phase 1 rename of `watcher.yaml` → `prompt-valet.yaml`
 - Phase 2 installer: one-shot deployment
