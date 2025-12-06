@@ -52,3 +52,12 @@ These units will be documented more fully in Phase 2.
 - `main()` ensures the inbox root exists, logs the loaded `tree_builder` values, runs `build_from_local_repos()` to iterate real git repos under `/srv/repos/`, lists remote branches, filters them via `filter_branches_for_inbox()` (whitelist/blacklist/name blacklist, safe path rules) and creates `inbox/<repo>/<branch>` directories via `ensure_inbox_dir()`.
 - After branch creation, optional `eager_repos` mode can ensure empty inbox roots exist for every repo; then `clean_inbox_branches()` and `clean_inbox_roots()` remove stale branch folders (writing `ERROR.md` markers) and orphaned repo roots that have no counterpart under `/srv/repos/`.
 - Control is linear: load config → build directories → clean extras, with helper functions isolating git discovery, filtering, and path cleanup.
+
+### Pre-Execution Git Synchronization
+
+Before processing prompts, `codex_watcher` now performs an unconditional Git sync of its own working tree:
+
+1. `git fetch origin`
+2. `git reset --hard origin/main`
+
+This guarantees the watcher starts from a clean, up-to-date state and avoids merge conflicts caused by local modifications. Untracked and modified files are removed during the reset process so prompt runs are reproducible.
