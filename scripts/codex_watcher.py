@@ -43,13 +43,13 @@ except ImportError as exc:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
-REPO_PATH = Path(__file__).resolve().parent.parent
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "inbox": {
         "root": "/srv/prompt-valet/inbox",
         "processed_root": "/srv/prompt-valet/processed",
     },
+    "git_repo_path": "/srv/prompt-valet-repo",
     "watcher": {
         "auto_clone_missing_repos": True,
         "git_default_owner": "nova-rey",
@@ -63,6 +63,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 # Simple global-ish config; populated in main()
 CONFIG: Dict[str, Any] = {}
+GIT_REPO_PATH: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -188,40 +189,48 @@ def prepare_branch(
 # ---------------------------------------------------------------------------
 
 
-def run_git_sync(repo_path: Path) -> None:
+def run_git_sync(repo_path: str) -> None:
+    repo = Path(repo_path).expanduser().resolve()
+    git_dir = repo / ".git"
+
+    if not git_dir.is_dir():
+        print(
+            f"[codex_watcher] ERROR: git_repo_path is not a Git repository: {repo} "
+            "(.git directory not found)."
+        )
+        raise RuntimeError(
+            "Git synchronization failed: configured git_repo_path is not a Git repository."
+        )
+
     try:
+        # Fetch latest from origin
         subprocess.run(
             ["git", "fetch", "origin"],
-            cwd=repo_path,
+            cwd=str(repo),
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
 
+        # Hard reset to origin/main
         subprocess.run(
             ["git", "reset", "--hard", "origin/main"],
-            cwd=repo_path,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        subprocess.run(
-            ["git", "clean", "-fd"],
-            cwd=repo_path,
+            cwd=str(repo),
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
 
         print(
-            "[codex_watcher] Repository synchronized (fetch + reset --hard origin/main)."
+            f"[codex_watcher] Repository synchronized at {repo} "
+            "(fetch + reset --hard origin/main)."
         )
 
-    except subprocess.CalledProcessError as e:  # pragma: no cover - requires git failure
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr.decode(errors="ignore") if getattr(e, "stderr", None) else str(e)
         print("[codex_watcher] ERROR: Git synchronization failed.")
-        print(e.stderr.decode() if hasattr(e, "stderr") else str(e))
-        raise RuntimeError("Git synchronization failed; aborting prompt execution.")
+        print(stderr)
+        raise RuntimeError("Git synchronization failed; aborting prompt execution.") from e
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +492,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
 
 
 def main(argv: Optional[list] = None) -> int:
-    global CONFIG
+    global CONFIG, GIT_REPO_PATH
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -495,8 +504,17 @@ def main(argv: Optional[list] = None) -> int:
 
     CONFIG = load_config()
 
+    GIT_REPO_PATH = CONFIG.get("git_repo_path")
+    if not GIT_REPO_PATH:
+        raise RuntimeError(
+            "codex_watcher: 'git_repo_path' is required in the configuration. "
+            "It must point to the root of the Git clone used for Codex runs."
+        )
+
+    GIT_REPO_PATH = str(Path(GIT_REPO_PATH).expanduser().resolve())
+
     try:
-        run_git_sync(REPO_PATH)
+        run_git_sync(GIT_REPO_PATH)
     except RuntimeError as exc:
         log(str(exc))
         return 1

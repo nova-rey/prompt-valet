@@ -37,6 +37,10 @@ The purpose of this file is to reflect **current truth**, not the future rename.
 - `scan_interval_seconds` (integer, default: `60`)
   - Placeholder for future daemon mode; today the tree-builder runs once but keeps this setting for a potential loop.
 
+### `git_repo_path`
+- Default: `/srv/prompt-valet-repo`
+- Root of the Git clone Codex will operate on. Must contain a `.git` directory.
+
 ### `watcher`
 - `auto_clone_missing_repos` (bool, default: `true`)
   - When a prompt arrives under `inbox/<repo>`, the watcher will auto-clone `/srv/repos/<repo>` if it does not exist.

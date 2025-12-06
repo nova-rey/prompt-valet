@@ -29,6 +29,10 @@ tree_builder:
   # one canonical place.
   scan_interval_seconds: 60
 
+# Root of the Git clone that Codex will operate on.
+# This must contain a .git directory.
+git_repo_path: "/srv/prompt-valet-repo"
+
 watcher:
   # If true, missing repos under /srv/repos/<repo> will be auto-cloned
   # when a prompt arrives in inbox/<repo>/<branch>/...prompt.md
