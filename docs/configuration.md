@@ -27,41 +27,33 @@ Watcher derives `<owner>` and `<repo>` from the prompt path, verifies that
 
 and then executes Codex in that repo.
 
-### `inbox_mode`
+### Owner and inbox mode
 
-Controls how the watcher interprets inbox paths when mapping prompts to Git repositories.
-
-Supported values:
+Watcher supports two inbox layouts, controlled by `inbox_mode`:
 
 - `legacy_single_owner` (default)
 
-  - Expected inbox layout (relative to `inbox`):
-
-    ```text
-    <repo>/<branch>/.../<prompt>.md
-    ```
-
-  - The repository owner is taken from `git_owner` in the configuration.
-  - The Git clone root is:
-
-    ```text
-    <repos_root>/<git_owner>/<repo>
-    ```
+  - Inbox layout: `<repo>/<branch>/.../<prompt>.md`
+  - Owner is taken from `git_owner`.
+  - If `git_owner` is not set at the top level, it is derived from
+    `watcher.git_default_owner`.
 
 - `multi_owner`
 
-  - Expected inbox layout:
+  - Inbox layout: `<owner>/<repo>/<branch>/.../<prompt>.md`
+  - Owner is taken from the first path segment.
 
-    ```text
-    <owner>/<repo>/<branch>/.../<prompt>.md
-    ```
+In both modes, the Git clone root is:
 
-  - The repository owner is taken from the first segment of the path.
-  - The Git clone root is:
+```text
+repos_root/<owner>/<repo>
+```
 
-    ```text
-    <repos_root>/<owner>/<repo>
-    ```
+`load_config()` normalizes the top-level keys `git_owner`, `git_host`, and
+`inbox_mode` from the watcher section when they are not explicitly set, so
+existing configs that use `git_default_owner` and `git_default_host` continue to
+work.
 
-If the inbox path does not match the expected layout for the current `inbox_mode`,
-the watcher logs a clear error and skips that prompt instead of guessing.
+If the inbox path does not match the expected layout for the current
+`inbox_mode`, the watcher logs a clear error and skips that prompt instead of
+guessing.
