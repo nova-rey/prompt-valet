@@ -16,3 +16,35 @@ Watcher now resolves the target Git repository for **each prompt** based on its 
   3. Run `git reset --hard origin/main`.
 
 If the derived repo is missing or not a Git repository, prompt execution fails fast instead of guessing a location.
+
+### Inbox Layout Modes
+
+Watcher can operate in two modes for inbox → repo resolution, controlled by `inbox_mode`:
+
+- **`legacy_single_owner`** (default):  
+  Designed for a single Git owner. Prompts are placed under:
+
+  ```text
+  inbox/<repo>/<branch>/.../<prompt>.md
+  ```
+
+  The owner is taken from git_owner, and repos are cloned under:
+
+  ```text
+  repos_root/<git_owner>/<repo>
+  ```
+
+- **`multi_owner`**:
+  Designed for multi-tenant setups. Prompts are placed under:
+
+  ```text
+  inbox/<owner>/<repo>/<branch>/.../<prompt>.md
+  ```
+
+  The owner is taken from the inbox path, and repos live at:
+
+  ```text
+  repos_root/<owner>/<repo>
+  ```
+
+If a prompt path does not match the expected shape for the active mode, watcher logs the reason and skips the file rather than attempting a best-effort guess.

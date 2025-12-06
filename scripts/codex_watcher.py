@@ -61,6 +61,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 # Simple global-ish config; populated in main()
 CONFIG: Dict[str, Any] = {}
+INBOX_MODE = "legacy_single_owner"
 
 
 # ---------------------------------------------------------------------------
@@ -117,45 +118,65 @@ def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.Complete
 def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
     """
     Given the config and the full path to a prompt file under the inbox tree,
-    derive the corresponding git repo root.
+    derive the corresponding git repo root based on the configured inbox_mode.
 
-    Supported layouts (relative to inbox_root):
+    Supported modes:
 
-        1) <owner>/<repo>/<branch>/.../<file>
-        2) <repo>/<branch>/.../<file>   (backwards-compatible)
+        - legacy_single_owner:
+            inbox layout: <repo>/<branch>/.../<file>
+            owner is taken from config['git_owner'].
 
-    In case (2), the owner is taken from config['git_owner'].
-    The repo root is always:
+        - multi_owner:
+            inbox layout: <owner>/<repo>/<branch>/.../<file>
+            owner is the first path segment.
+
+    Repo root is always:
 
         repos_root/<owner>/<repo>
     """
     inbox_root = Path(config["inbox"]).expanduser().resolve()
     repos_root = Path(config["repos_root"]).expanduser().resolve()
 
+    mode = config.get("inbox_mode", "legacy_single_owner")
+
     prompt = Path(prompt_path).expanduser().resolve()
     rel = prompt.relative_to(inbox_root)
     parts = rel.parts
 
-    if len(parts) < 2:
-        raise RuntimeError(
-            f"Cannot derive repo from prompt path {prompt}: expected "
-            "<repo>/<branch>/... or <owner>/<repo>/<branch>/..., got {rel}"
-        )
+    if mode == "legacy_single_owner":
+        # Expect at least <repo>/<branch>/.../<file>
+        if len(parts) < 2:
+            raise RuntimeError(
+                f"Cannot derive repo from prompt path {prompt} in legacy_single_owner "
+                f"mode: expected <repo>/<branch>/..., got {rel}"
+            )
 
-    git_owner = config.get("git_owner")
-    if not git_owner:
-        raise RuntimeError(
-            "Configuration missing required 'git_owner' key for repo resolution."
-        )
+        git_owner = config.get("git_owner")
+        if not git_owner:
+            raise RuntimeError(
+                "Configuration missing required 'git_owner' key in "
+                "legacy_single_owner mode."
+            )
 
-    if len(parts) >= 4:
-        # New layout: owner/repo/branch/file
-        owner = parts[0]
-        repo_name = parts[1]
-    else:
-        # Backwards-compatible layout: repo/branch/file
         owner = git_owner
         repo_name = parts[0]
+
+    elif mode == "multi_owner":
+        # Expect at least <owner>/<repo>/<branch>/.../<file>
+        if len(parts) < 3:
+            raise RuntimeError(
+                f"Cannot derive repo from prompt path {prompt} in multi_owner mode: "
+                f"expected <owner>/<repo>/<branch>/..., got {rel}"
+            )
+
+        owner = parts[0]
+        repo_name = parts[1]
+
+    else:
+        raise RuntimeError(
+            f"Unknown inbox_mode '{mode}' in configuration; expected "
+            "'legacy_single_owner' or 'multi_owner'."
+        )
 
     repo_root = repos_root / owner / repo_name
     return repo_root
@@ -359,12 +380,26 @@ class InboxHandler(FileSystemEventHandler):
             # Not actually under the inbox; ignore
             return
 
-        parts = list(rel.parts)
-        if len(parts) < 4:
-            log(f"Path {rel!s} does not look like owner/repo/branch/file, skipping.")
+        try:
+            _ = derive_repo_root_from_prompt(CONFIG, str(path))
+        except RuntimeError as exc:
+            print(
+                f"[codex_watcher] Skipping prompt {path}: "
+                f"unable to derive repo root ({exc})."
+            )
             return
 
-        git_owner, repo_name, branch_name = parts[0], parts[1], parts[2]
+        mode = INBOX_MODE
+        parts = list(rel.parts)
+        if mode == "legacy_single_owner":
+            git_owner = CONFIG.get("git_owner", "")
+            repo_name = parts[0]
+            branch_name = parts[1]
+        else:
+            git_owner = parts[0]
+            repo_name = parts[1]
+            branch_name = parts[2]
+
         job = Job(
             git_owner=git_owner,
             repo_name=repo_name,
@@ -529,7 +564,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
 
 
 def main(argv: Optional[list] = None) -> int:
-    global CONFIG
+    global CONFIG, INBOX_MODE
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -540,6 +575,7 @@ def main(argv: Optional[list] = None) -> int:
     args = parser.parse_args(argv)
 
     CONFIG = load_config()
+    INBOX_MODE = CONFIG.get("inbox_mode", "legacy_single_owner")
 
     inbox_root = Path(CONFIG["inbox"])
     processed_root = Path(CONFIG["processed"])
@@ -557,10 +593,27 @@ def main(argv: Optional[list] = None) -> int:
                 rel = path.relative_to(inbox_root)
             except ValueError:
                 continue
-            parts = list(rel.parts)
-            if len(parts) < 4:
+
+            try:
+                _ = derive_repo_root_from_prompt(CONFIG, str(path))
+            except RuntimeError as exc:
+                print(
+                    f"[codex_watcher] Skipping prompt {path}: "
+                    f"unable to derive repo root ({exc})."
+                )
                 continue
-            git_owner, repo_name, branch_name = parts[0], parts[1], parts[2]
+
+            parts = list(rel.parts)
+            mode = INBOX_MODE
+            if mode == "legacy_single_owner":
+                git_owner, repo_name, branch_name = (
+                    CONFIG.get("git_owner", ""),
+                    parts[0],
+                    parts[1],
+                )
+            else:
+                git_owner, repo_name, branch_name = parts[0], parts[1], parts[2]
+
             job_queue.put(Job(git_owner, repo_name, branch_name, path))
 
         # Process synchronously
