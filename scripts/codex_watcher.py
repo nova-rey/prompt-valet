@@ -298,7 +298,9 @@ def build_repo_root() -> Path:
     return Path("/srv/repos")
 
 
-def run_codex_for_job(repo_dir: Path, job: Job) -> None:
+def run_codex_for_job(
+    repo_dir: Path, job: Job, prompt_path: Path, run_root: Path, run_id: str
+) -> None:
     """
     Invoke the Codex CLI using the prompt file as the input prompt.
 
@@ -316,6 +318,15 @@ def run_codex_for_job(repo_dir: Path, job: Job) -> None:
     stamp = dt.datetime.utcnow().strftime("%Y%m%d-%H%M-%S")
     out_file = runs_dir / f"codex-run-{stamp}.md"
 
+    env = os.environ.copy()
+    env.update(
+        {
+            "PV_RUN_ID": run_id,
+            "PV_RUN_ROOT": str(run_root),
+            "PV_PROMPT_FILE": str(prompt_path),
+        }
+    )
+
     cli_cmd = [
         cmd,
         "exec",
@@ -328,7 +339,7 @@ def run_codex_for_job(repo_dir: Path, job: Job) -> None:
         model,
         "--sandbox",
         sandbox,
-        str(job.prompt_path),
+        str(prompt_path),
     ]
 
     log(f"Running Codex CLI for job {job!r}")
@@ -336,6 +347,7 @@ def run_codex_for_job(repo_dir: Path, job: Job) -> None:
         cli_cmd,
         text=True,
         capture_output=True,
+        env=env,
     )
     if proc.stdout:
         log(f"codex STDOUT:\n{proc.stdout.rstrip()}")
@@ -366,14 +378,41 @@ def process_job(job: Job) -> None:
     job_branch = job.branch_name
     prepare_branch(repo_dir, job_branch, base_branch="main")
 
-    run_codex_for_job(repo_dir, job)
+    run_id = dt.datetime.utcnow().strftime("%Y%m%d-%H%M-%S")
+    run_root = processed_root / job.repo_name / job.branch_name / run_id
+    run_root.mkdir(parents=True, exist_ok=True)
+    prompt_path = run_root / "prompt.md"
 
-    # Move prompt file to processed bucket
-    rel = job.prompt_path.relative_to(inbox_root)
-    dest = processed_root / rel
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(job.prompt_path), str(dest))
-    log(f"Moved processed prompt to {dest}")
+    original_prompt_path = job.prompt_path
+
+    try:
+        shutil.move(original_prompt_path, prompt_path)
+    except FileNotFoundError:
+        log(
+            "[prompt-valet] Warning: prompt file missing at inbox path, "
+            "continuing with no-op Codex run."
+        )
+        prompt_exists = False
+    else:
+        prompt_exists = True
+
+    job.prompt_path = prompt_path
+
+    log(
+        "[prompt-valet] "
+        f"run={run_id} repo={job.repo_name} branch={job.branch_name} "
+        f"prompt={prompt_path} processed={run_root}"
+    )
+
+    if prompt_exists:
+        run_codex_for_job(repo_dir, job, prompt_path, run_root, run_id)
+    else:
+        no_input = run_root / "NO_INPUT.md"
+        no_input.write_text(
+            "This run started without a prompt file. Likely the prompt "
+            "referenced inbox paths or moved itself. Execution continued "
+            "safely.\n"
+        )
 
 
 def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
