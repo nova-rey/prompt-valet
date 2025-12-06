@@ -2,18 +2,26 @@
 
 ### Inbox / Repo Layout
 
-Watcher assumes a mirrored directory layout between the inbox and the Git clones:
+Watcher supports two relative layouts under `inbox_root`:
 
-- Inbox:
-  `inbox_root/<git_owner>/<repo_name>/.../<prompt>.md`
-- Repos:
-  `repos_root/<git_owner>/<repo_name>/.git`
+1. **New layout (explicit owner):**
 
-For each prompt, watcher derives the target repo from the prompt’s inbox path and then:
+   `inbox_root/<owner>/<repo>/<branch>/.../<prompt>.md`
 
-1. Computes the repo root as `repos_root/<git_owner>/<repo_name>`.
-2. Verifies it is a Git repository (`.git` exists).
-3. Runs `git fetch origin` and `git reset --hard origin/main` in that repo.
-4. Executes Codex with that repo as the working directory.
+2. **Legacy layout (no owner):**
 
-This makes watcher multi-repo by design, with no hard-coded repo paths.
+   `inbox_root/<repo>/<branch>/.../<prompt>.md`
+
+In layout (2), the owner is taken from `git_owner` in the configuration.
+
+The corresponding Git repo root is:
+
+`repos_root/<owner>/<repo>`
+
+Watcher derives `<owner>` and `<repo>` from the prompt path, verifies that
+`repos_root/<owner>/<repo>/.git` exists, synchronizes it with:
+
+- `git fetch origin`
+- `git reset --hard origin/main`
+
+and then executes Codex in that repo.

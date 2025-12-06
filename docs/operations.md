@@ -6,8 +6,10 @@ Watcher now discards all uncommitted changes and untracked files on each run via
 
 Watcher now resolves the target Git repository for **each prompt** based on its inbox path and the configured `repos_root`.
 
-- Expected inbox layout: `inbox_root/<git_owner>/<repo_name>/.../<prompt>.md`.
-- Derived repo root: `repos_root/<git_owner>/<repo_name>` (must contain `.git`).
+- Supported inbox layouts:
+  - New: `inbox_root/<owner>/<repo>/<branch>/.../<prompt>.md`
+  - Legacy: `inbox_root/<repo>/<branch>/.../<prompt>.md` (owner taken from `git_owner`)
+- Derived repo root: `repos_root/<owner>/<repo>` (must contain `.git`).
 - For every prompt before execution, watcher will:
   1. Verify the derived repo is a Git repo.
   2. Run `git fetch origin`.

@@ -119,30 +119,45 @@ def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
     Given the config and the full path to a prompt file under the inbox tree,
     derive the corresponding git repo root.
 
-    Expected layout:
-        inbox_root/<git_owner>/<repo_name>/.../<prompt>.md
+    Supported layouts (relative to inbox_root):
 
-    The repo root is:
-        repos_root/<git_owner>/<repo_name>
+        1) <owner>/<repo>/<branch>/.../<file>
+        2) <repo>/<branch>/.../<file>   (backwards-compatible)
+
+    In case (2), the owner is taken from config['git_owner'].
+    The repo root is always:
+
+        repos_root/<owner>/<repo>
     """
     inbox_root = Path(config["inbox"]).expanduser().resolve()
     repos_root = Path(config["repos_root"]).expanduser().resolve()
 
     prompt = Path(prompt_path).expanduser().resolve()
     rel = prompt.relative_to(inbox_root)
-
-    # rel is like: <git_owner>/<repo_name>/.../<prompt>.md
     parts = rel.parts
+
     if len(parts) < 2:
         raise RuntimeError(
-            f"Cannot derive repo from prompt path {prompt}: expected at least "
-            "<git_owner>/<repo_name>/..., got {rel}"
+            f"Cannot derive repo from prompt path {prompt}: expected "
+            "<repo>/<branch>/... or <owner>/<repo>/<branch>/..., got {rel}"
         )
 
-    git_owner = parts[0]
-    repo_name = parts[1]
+    git_owner = config.get("git_owner")
+    if not git_owner:
+        raise RuntimeError(
+            "Configuration missing required 'git_owner' key for repo resolution."
+        )
 
-    repo_root = repos_root / git_owner / repo_name
+    if len(parts) >= 4:
+        # New layout: owner/repo/branch/file
+        owner = parts[0]
+        repo_name = parts[1]
+    else:
+        # Backwards-compatible layout: repo/branch/file
+        owner = git_owner
+        repo_name = parts[0]
+
+    repo_root = repos_root / owner / repo_name
     return repo_root
 
 
