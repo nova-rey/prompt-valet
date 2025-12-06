@@ -30,19 +30,14 @@ from typing import Any, Dict, Literal, Optional, Tuple
 
 import yaml  # type: ignore
 
-try:
-    from watchdog.events import FileSystemEventHandler, FileSystemEvent
-    from watchdog.observers import Observer
-except ImportError as exc:  # pragma: no cover
-    print(f"[codex_watcher] watchdog is required: {exc}", file=sys.stderr)
-    sys.exit(1)
-
 
 # ---------------------------------------------------------------------------
 # Config & constants
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
+DEBOUNCE_SECONDS = 2
+POLL_INTERVAL_SECONDS = 1.0
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "inbox": "/srv/prompt-valet/inbox",
@@ -63,6 +58,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 # Simple global-ish config; populated in main()
 CONFIG: Dict[str, Any] = {}
 INBOX_MODE = "legacy_single_owner"
+JOB_STATES: Dict[str, str] = {}
 
 STATUS_RUNNING = "running"
 STATUS_DONE = "done"
@@ -343,6 +339,19 @@ def _statusified_name(name: str, status: str) -> str:
     return f"{stem}.{status}.{ext}"
 
 
+def _job_key(rel: Path) -> str:
+    """Normalize a job key for de-duplication across watcher loops."""
+    return str(rel)
+
+
+def _prompt_rel_from_running(rel_running: Path) -> Path:
+    """Return the original *.prompt.md relative path for a running file."""
+    if rel_running.name.endswith(".running.md"):
+        prompt_name = rel_running.name[: -len(".running.md")] + ".prompt.md"
+        return rel_running.with_name(prompt_name)
+    return rel_running
+
+
 def claim_inbox_prompt(inbox_root: Path, rel: Path) -> Path:
     """
     Atomically claim a prompt in the inbox by renaming:
@@ -410,6 +419,115 @@ def finalize_inbox_prompt(
     finished_path = finished_root / finished_rel
     finished_path.parent.mkdir(parents=True, exist_ok=True)
     final_inbox_path.replace(finished_path)
+
+
+def start_jobs_from_running(
+    inbox_root: Path, processed_root: Path, job_queue: "queue.Queue[Job]"
+) -> None:
+    """
+    Phase B of the watcher loop: start jobs based on *.running.md files.
+
+    All job metadata is derived from the running file; the job is only marked
+    RUNNING after the file has been copied into the run directory.
+    """
+
+    for running_path in inbox_root.rglob("*.running.md"):
+        if not running_path.is_file():
+            continue
+
+        try:
+            rel_running = running_path.relative_to(inbox_root)
+        except ValueError:
+            continue
+
+        prompt_rel = _prompt_rel_from_running(rel_running)
+        key = _job_key(prompt_rel)
+        if JOB_STATES.get(key) in {STATUS_RUNNING, STATUS_DONE, STATUS_ERROR}:
+            continue
+
+        try:
+            git_owner, repo_name, branch_name, _, _ = resolve_prompt_repo(
+                CONFIG, str(inbox_root / prompt_rel)
+            )
+        except RuntimeError as exc:
+            print(
+                f"[codex_watcher] Skipping running prompt {running_path}: "
+                f"unable to derive repo root ({exc})."
+            )
+            continue
+
+        run_id = dt.datetime.utcnow().strftime("%Y%m%d-%H%M-%S")
+        run_root = (
+            processed_root
+            / git_owner
+            / repo_name
+            / branch_name
+            / run_id
+        )
+        run_root.mkdir(parents=True, exist_ok=True)
+
+        prompt_copy_path = run_root / "prompt.md"
+        try:
+            shutil.copy2(running_path, prompt_copy_path)
+        except FileNotFoundError:
+            log(
+                "[prompt-valet] Warning: running prompt missing during job "
+                "startup; deferring until next loop."
+            )
+            continue
+
+        job = Job(
+            git_owner=git_owner,
+            repo_name=repo_name,
+            branch_name=branch_name,
+            inbox_rel=prompt_rel,
+            inbox_path=running_path,
+            run_root=run_root,
+            prompt_path=prompt_copy_path,
+        )
+
+        JOB_STATES[key] = STATUS_RUNNING
+        log(
+            "[prompt-valet] queued job "
+            f"prompt={prompt_rel} run_root={run_root}"
+        )
+        job_queue.put(job)
+
+
+def claim_new_prompts(inbox_root: Path) -> None:
+    """
+    Phase A of the watcher loop: claim *.prompt.md files after a short debounce.
+
+    The debounce protects against race conditions where the file is still being
+    written; real job creation is deferred to processing of *.running.md files.
+    """
+
+    now = time.time()
+    for path in inbox_root.rglob("*.prompt.md"):
+        if not path.is_file():
+            continue
+
+        running_candidate = path.with_name(
+            _statusified_name(path.name, STATUS_RUNNING)
+        )
+        if running_candidate.exists():
+            continue
+
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+
+        if now - mtime < DEBOUNCE_SECONDS:
+            continue
+
+        rel = path.relative_to(inbox_root)
+        try:
+            running_path = claim_inbox_prompt(inbox_root, rel)
+        except FileNotFoundError:
+            continue
+        else:
+            log(f"Claimed prompt {rel} as {running_path.name}")
 
 
 # ---------------------------------------------------------------------------
@@ -517,66 +635,8 @@ class Job:
     branch_name: str
     inbox_rel: Path
     inbox_path: Path
-
-
-class InboxHandler(FileSystemEventHandler):
-    """
-    Watches for new *.prompt.md files anywhere under the inbox root.
-    """
-
-    def __init__(self, inbox_root: Path, job_queue: "queue.Queue[Job]") -> None:
-        super().__init__()
-        self.inbox_root = inbox_root
-        self.job_queue = job_queue
-
-    def _maybe_enqueue(self, path: Path) -> None:
-        if not path.name.endswith(".prompt.md"):
-            return
-
-        try:
-            rel = path.relative_to(self.inbox_root)
-        except ValueError:
-            return
-
-        try:
-            git_owner, repo_name, branch_name, _, _ = resolve_prompt_repo(
-                CONFIG, str(path)
-            )
-        except RuntimeError as exc:
-            print(
-                f"[codex_watcher] Skipping prompt {path}: "
-                f"unable to derive repo root ({exc})."
-            )
-            return
-
-        try:
-            running_path = claim_inbox_prompt(self.inbox_root, rel)
-        except FileNotFoundError:
-            print(
-                f"[prompt-valet] Warning: prompt file {rel} disappeared "
-                "before it could be claimed; skipping."
-            )
-            return
-
-        job = Job(
-            git_owner=git_owner,
-            repo_name=repo_name,
-            branch_name=branch_name,
-            inbox_rel=rel,
-            inbox_path=running_path,
-        )
-        log(f"Detected new prompt file: {running_path}")
-        self.job_queue.put(job)
-
-    def on_created(self, event: FileSystemEvent) -> None:  # pragma: no cover
-        if event.is_directory:
-            return
-        self._maybe_enqueue(Path(event.src_path))
-
-    def on_moved(self, event: FileSystemEvent) -> None:  # pragma: no cover
-        if event.is_directory:
-            return
-        self._maybe_enqueue(Path(event.dest_path))
+    run_root: Path
+    prompt_path: Path
 
 
 def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path, run_id: str) -> None:
@@ -598,7 +658,7 @@ def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path, run_id: str) -> 
     out_file = runs_dir / f"codex-run-{stamp}.md"
 
     env = os.environ.copy()
-    prompt_path = Path(job.inbox_path)
+    prompt_path = Path(job.prompt_path)
 
     env.update(
         {
@@ -649,11 +709,9 @@ def process_job(job: Job) -> None:
     - run Codex
     - (Codex prompt is responsible for commits/PRs)
     """
-    inbox_root = Path(CONFIG["inbox"])
-    processed_root = Path(CONFIG["processed"])
     repos_root = Path(CONFIG["repos_root"]).expanduser().resolve()
 
-    original_prompt_path = inbox_root / job.inbox_rel
+    original_prompt_path = Path(CONFIG["inbox"]) / job.inbox_rel
     repo_dir = derive_repo_root_from_prompt(CONFIG, str(original_prompt_path))
     ensure_repo_cloned(repos_root, job.git_owner, job.repo_name)
 
@@ -662,31 +720,25 @@ def process_job(job: Job) -> None:
     job_branch = job.branch_name
     prepare_branch(repo_dir, job_branch, base_branch="main")
 
-    run_id = dt.datetime.utcnow().strftime("%Y%m%d-%H%M-%S")
-    run_root = processed_root / job.git_owner / job.repo_name / job.branch_name / run_id
+    run_root = job.run_root
     run_root.mkdir(parents=True, exist_ok=True)
-    prompt_path = run_root / "prompt.md"
-
-    inbox_running = Path(job.inbox_path)
-    if inbox_running.exists():
-        shutil.copy2(inbox_running, prompt_path)
-        prompt_exists = True
-    else:
-        log(
-            "[prompt-valet] Warning: prompt file missing at inbox path, "
-            "continuing with no-op Codex run."
-        )
-        prompt_exists = False
+    prompt_path = Path(job.prompt_path)
+    prompt_exists = prompt_path.exists()
 
     log(
         "[prompt-valet] "
-        f"run={run_id} repo={job.git_owner}/{job.repo_name} branch={job.branch_name} "
-        f"prompt_inbox={inbox_running} prompt_copy={prompt_path} processed={run_root}"
+        f"run={run_root.name} repo={job.git_owner}/{job.repo_name} "
+        f"branch={job.branch_name} prompt_inbox={job.inbox_path} "
+        f"prompt_copy={prompt_path} processed={run_root}"
     )
 
     if prompt_exists:
-        run_codex_for_job(repo_dir, job, run_root, run_id)
+        run_codex_for_job(repo_dir, job, run_root, run_root.name)
     else:
+        log(
+            "[prompt-valet] Warning: prompt copy missing in run directory; "
+            "continuing with no-op Codex run."
+        )
         no_input = run_root / "NO_INPUT.md"
         no_input.write_text(
             "This run started without a prompt file. Likely the prompt "
@@ -702,7 +754,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
     inbox_root = Path(CONFIG["inbox"])
     finished_root = Path(CONFIG["finished"])
 
-    while not stop_event.is_set():
+    while not (stop_event.is_set() and job_queue.empty()):
         try:
             job = job_queue.get(timeout=1.0)
         except queue.Empty:
@@ -713,6 +765,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
             process_job(job)
         except Exception as exc:
             log(f"Error processing {job.inbox_path}: {exc!r}")
+            JOB_STATES[_job_key(job.inbox_rel)] = STATUS_ERROR
             finalize_inbox_prompt(
                 inbox_root=inbox_root,
                 finished_root=finished_root,
@@ -720,6 +773,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
                 status=STATUS_ERROR,
             )
         else:
+            JOB_STATES[_job_key(job.inbox_rel)] = STATUS_DONE
             finalize_inbox_prompt(
                 inbox_root=inbox_root,
                 finished_root=finished_root,
@@ -748,6 +802,7 @@ def main(argv: Optional[list] = None) -> int:
 
     CONFIG = load_config()
     INBOX_MODE = CONFIG.get("inbox_mode", "legacy_single_owner")
+    JOB_STATES.clear()
 
     inbox_root = Path(CONFIG["inbox"])
     processed_root = Path(CONFIG["processed"])
@@ -758,46 +813,10 @@ def main(argv: Optional[list] = None) -> int:
     finished_root.mkdir(parents=True, exist_ok=True)
     Path(CONFIG["repos_root"]).expanduser().resolve().mkdir(parents=True, exist_ok=True)
 
-    job_queue: "queue.Queue[Job]" = queue.Queue()
-    stop_event = threading.Event()
-
     if args.once:
-        # Simple scan and exit: enqueue any existing *.prompt.md files
-        for path in inbox_root.rglob("*.prompt.md"):
-            if not path.is_file():
-                continue
-
-            rel = path.relative_to(inbox_root)
-
-            try:
-                git_owner, repo_name, branch_name, _, _ = resolve_prompt_repo(
-                    CONFIG, str(path)
-                )
-            except RuntimeError as exc:
-                print(
-                    f"[codex_watcher] Skipping prompt {path}: "
-                    f"unable to derive repo root ({exc})."
-                )
-                continue
-
-            try:
-                running_path = claim_inbox_prompt(inbox_root, rel)
-            except FileNotFoundError:
-                print(
-                    f"[prompt-valet] Warning: prompt file {rel} disappeared "
-                    "before it could be claimed; skipping."
-                )
-                continue
-
-            job_queue.put(
-                Job(
-                    git_owner=git_owner,
-                    repo_name=repo_name,
-                    branch_name=branch_name,
-                    inbox_rel=rel,
-                    inbox_path=running_path,
-                ),
-            )
+        job_queue: "queue.Queue[Job]" = queue.Queue()
+        claim_new_prompts(inbox_root)
+        start_jobs_from_running(inbox_root, processed_root, job_queue)
 
         # Process synchronously
         while not job_queue.empty():
@@ -806,6 +825,7 @@ def main(argv: Optional[list] = None) -> int:
                 process_job(job)
             except Exception as exc:  # pragma: no cover
                 log(f"Error processing {job.inbox_path}: {exc!r}")
+                JOB_STATES[_job_key(job.inbox_rel)] = STATUS_ERROR
                 finalize_inbox_prompt(
                     inbox_root=inbox_root,
                     finished_root=finished_root,
@@ -814,6 +834,7 @@ def main(argv: Optional[list] = None) -> int:
                     delay_seconds=0.0,
                 )
             else:
+                JOB_STATES[_job_key(job.inbox_rel)] = STATUS_DONE
                 finalize_inbox_prompt(
                     inbox_root=inbox_root,
                     finished_root=finished_root,
@@ -826,10 +847,8 @@ def main(argv: Optional[list] = None) -> int:
         return 0
 
     # Normal watcher mode
-    handler = InboxHandler(inbox_root, job_queue)
-    observer = Observer()
-    observer.schedule(handler, str(inbox_root), recursive=True)
-    observer.start()
+    job_queue: "queue.Queue[Job]" = queue.Queue()
+    stop_event = threading.Event()
     log(f"Starting Codex watcher on {inbox_root}")
 
     t = threading.Thread(target=worker, args=(job_queue, stop_event), daemon=True)
@@ -838,18 +857,18 @@ def main(argv: Optional[list] = None) -> int:
     def _handle_sigterm(signum, frame):  # pragma: no cover
         log(f"Received signal {signum}, stopping watcher...")
         stop_event.set()
-        observer.stop()
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
 
     try:
-        while observer.is_alive():
-            observer.join(timeout=1.0)
+        while not stop_event.is_set():
+            claim_new_prompts(inbox_root)
+            start_jobs_from_running(inbox_root, processed_root, job_queue)
+            time.sleep(POLL_INTERVAL_SECONDS)
     finally:
         stop_event.set()
-        observer.stop()
-        observer.join()
+        t.join()
 
     return 0
 
