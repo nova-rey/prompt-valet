@@ -723,17 +723,16 @@ def load_config() -> Dict[str, Any]:
     cfg["finished"] = str(finished_root)
     cfg["repos_root"] = str(repos_root)
 
+    runner_cmd = watcher_cfg.get("runner_cmd", "codex")
     log(
         "[prompt-valet] loaded config="
         f"{loaded_path} "
         f"inbox={inbox_root} "
         f"processed={processed_root} "
-        f"finished={finished_root} "
-        f"repos_root={repos_root} "
         f"git_owner={cfg.get('git_owner')} "
         f"git_host={cfg.get('git_host')} "
         f"git_protocol={watcher_cfg.get('git_protocol', 'https')} "
-        f"runner={watcher_cfg.get('runner_cmd')}"
+        f"runner={runner_cmd} exec"
     )
 
     return cfg

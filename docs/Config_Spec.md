@@ -2,7 +2,7 @@
 
 This file documents the configuration **as it exists today** in the repo.
 
-The agent must inspect the current `watcher.yaml` in the repo and populate:
+The agent must inspect the current `prompt-valet.yaml` in the repo and populate:
 
 1. Top-level sections
 2. Supported keys
@@ -18,7 +18,7 @@ The purpose of this file is to reflect **current truth**, not the future rename.
 - This file must reflect the state prior to P1·C2.
 
 ## Current Configuration Source
-- Path: `configs/codex-runner.yaml`
+- Path: `configs/prompt-valet.yaml`
 - Format: YAML with comments that describe the behavior enforced by the watcher and tree-builder.
 
 ## Top-Level Sections

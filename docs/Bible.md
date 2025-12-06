@@ -46,7 +46,7 @@ processed/
 
 config/
 
-watcher.yaml # will be renamed in P1·C2
+prompt-valet.yaml # canonical runtime config at /srv/prompt-valet/config/prompt-valet.yaml
 
 copyparty.yaml
 

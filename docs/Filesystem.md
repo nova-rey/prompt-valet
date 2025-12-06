@@ -11,7 +11,7 @@ processed/
 
 config/
 
-watcher.yaml # temporary name; will become prompt-valet.yaml
+prompt-valet.yaml # YAML-based canonical config at /srv/prompt-valet/config/prompt-valet.yaml
 
 copyparty.yaml
 

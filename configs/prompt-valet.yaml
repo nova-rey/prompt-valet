@@ -1,0 +1,39 @@
+# prompt-valet.yaml
+# Canonical configuration for Prompt Valet components.
+
+inbox: "/srv/prompt-valet/inbox"
+processed: "/srv/prompt-valet/processed"
+repos_root: "/srv/prompt-valet/repos"
+
+# Tree builder configuration (shared defaults for rebuild_inbox_tree.py).
+tree_builder:
+  # When true, pre-create inbox roots for every repo under /srv/prompt-valet/repos.
+  greedy_inboxes: false
+
+  # Branch selection strategy: "all", "whitelist", "blacklist", or "both".
+  branch_mode: "all"
+  branch_whitelist: []
+  branch_blacklist: []
+
+  # Names that should never be treated as real branches (e.g., "HEAD").
+  branch_name_blacklist:
+    - "HEAD"
+
+  # Legacy hints (not actively enforced yet).
+  placeholder_branches:
+    - "main"
+    - "devel"
+    - "api"
+    - "phase5"
+  scan_interval_seconds: 60
+
+# Watcher-specific options used by both scripts.
+watcher:
+  auto_clone_missing_repos: true
+  git_default_owner: "owner"
+  git_default_host: "github.com"
+  git_protocol: "https"
+  cleanup_non_git_dirs: true
+  runner_cmd: "codex"
+  runner_model: "gpt-5.1-codex-mini"
+  runner_sandbox: "danger-full-access"

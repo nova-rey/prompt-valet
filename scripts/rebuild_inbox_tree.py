@@ -33,7 +33,7 @@ A background systemd timer can run this periodically to provide
 
 Config (YAML):
 
-    /srv/prompt-valet/config/codex-runner.yaml
+    /srv/prompt-valet/config/prompt-valet.yaml
 
     tree_builder:
       # If true, also create an empty inbox root for every repo
@@ -66,6 +66,7 @@ Config (YAML):
 
 from __future__ import annotations
 
+import copy
 import shutil
 import subprocess
 from pathlib import Path
@@ -76,7 +77,7 @@ import yaml
 # Filesystem layout
 INBOX_ROOT = Path("/srv/prompt-valet/inbox")
 REPOS_ROOT = Path("/srv/repos")
-CONFIG_PATH = Path("/srv/prompt-valet/config/codex-runner.yaml")
+DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
 
 
 def log(msg: str) -> None:
@@ -86,7 +87,10 @@ def log(msg: str) -> None:
 # --- Config loading (YAML) --------------------------------------------------
 
 
-DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "inbox": str(INBOX_ROOT),
+    "processed": "/srv/prompt-valet/processed",
+    "repos_root": str(REPOS_ROOT),
     "tree_builder": {
         "eager_repos": False,
         "branch_mode": "all",  # "all" | "whitelist" | "blacklist"
@@ -99,35 +103,56 @@ DEFAULT_CONFIG: Dict[str, Dict[str, Any]] = {
     },
     "watcher": {
         "auto_clone_missing_repos": True,
-        "git_default_owner": None,
+        "git_default_owner": "owner",
         "git_default_host": "github.com",
+        "git_protocol": "https",
+        "cleanup_non_git_dirs": True,
+        "runner_cmd": "codex",
+        "runner_model": "gpt-5.1-codex-mini",
+        "runner_sandbox": "danger-full-access",
     },
 }
 
 
-def load_config() -> Dict[str, Dict[str, Any]]:
+def load_config() -> Dict[str, Any]:
     """
-    Load configuration from CONFIG_PATH, shallow-merged over DEFAULT_CONFIG.
+    Load configuration from DEFAULT_CONFIG_PATH, merging into DEFAULT_CONFIG.
 
     Missing file or parse failure fall back to DEFAULT_CONFIG.
     """
-    cfg: Dict[str, Dict[str, Any]] = {k: v.copy() for k, v in DEFAULT_CONFIG.items()}
+    cfg: Dict[str, Any] = copy.deepcopy(DEFAULT_CONFIG)
+    path = DEFAULT_CONFIG_PATH
+    loaded_path = "<defaults>"
 
-    if not CONFIG_PATH.is_file():
-        log(f"No config file at {CONFIG_PATH}, using defaults.")
-        return cfg
+    if not path.is_file():
+        log(f"No config file at {path}, using defaults.")
+    else:
+        try:
+            user_cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(user_cfg, dict):
+                raise ValueError("YAML config is not a mapping at the top level.")
 
-    try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as f:
-            user_cfg = yaml.safe_load(f) or {}
-    except Exception as e:
-        log(f"Failed to read config file {CONFIG_PATH}: {e}; using defaults.")
-        return cfg
+            for section, values in user_cfg.items():
+                if isinstance(values, dict) and isinstance(cfg.get(section), dict):
+                    cfg[section].update(values)
+                else:
+                    cfg[section] = values
 
-    for section, values in user_cfg.items():
-        if section in cfg and isinstance(values, dict):
-            for key, value in values.items():
-                cfg[section][key] = value
+            loaded_path = str(path)
+        except Exception as exc:
+            log(f"Failed to read config file {path}: {exc}; using defaults.")
+
+    watcher_cfg = cfg.get("watcher", {})
+    log(
+        "[prompt-valet] loaded config="
+        f"{loaded_path} "
+        f"inbox={INBOX_ROOT} "
+        "processed=<n/a> "
+        f"git_owner={watcher_cfg.get('git_default_owner')} "
+        f"git_host={watcher_cfg.get('git_default_host')} "
+        f"git_protocol={watcher_cfg.get('git_protocol')} "
+        "runner=<none>"
+    )
 
     return cfg
 
