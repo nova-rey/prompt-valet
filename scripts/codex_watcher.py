@@ -27,6 +27,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+import textwrap
 from typing import Any, Dict, Literal, Optional, Sequence, Tuple
 
 import yaml  # type: ignore
@@ -83,6 +84,19 @@ def log(msg: str) -> None:
 # ---------------------------------------------------------------------------
 # Git helpers
 # ---------------------------------------------------------------------------
+
+
+def run_cmd(cmd: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
+    """Run a shell command, returning (returncode, stdout, stderr)."""
+
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd is not None else None,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode, proc.stdout, proc.stderr
 
 
 def _run_git(
@@ -162,16 +176,19 @@ def ensure_worker_repo_clean_and_synced(
     """
 
     git_dir = repo_path / ".git"
+    repo_root = repo_path.parent.parent
+    git_owner = repo_path.parent.name
+    repo_name = repo_path.name
 
-    def _reclone_missing_repo() -> bool:
-        if repo_path.exists() and not git_dir.is_dir():
+    def _fresh_clone() -> bool:
+        if repo_path.exists():
             logger.info(
-                "Git preflight: repository at %s is not a git repo; replacing it.",
+                "Git preflight: replacing worker repo at %s to ensure clean state.",
                 repo_path,
             )
             shutil.rmtree(repo_path)
         try:
-            ensure_repo_cloned(repo_path.parent.parent, repo_path.parent.name, repo_path.name)
+            ensure_repo_cloned(repo_root, git_owner, repo_name)
         except Exception:
             logger.exception(
                 "Git preflight: failed to clone worker repo at %s; skipping Codex run.",
@@ -180,16 +197,8 @@ def ensure_worker_repo_clean_and_synced(
             return False
         return True
 
-    def _reset_and_clean() -> bool:
-        logger.info(
-            "Git preflight: repo dirty; performing reset --hard origin/%s and git clean -fdx.",
-            branch,
-        )
-        for args in (
-            ["fetch", "--prune"],
-            ["reset", "--hard", f"origin/{branch}"],
-            ["clean", "-fdx"],
-        ):
+    def _checkout_main_and_pull() -> bool:
+        for args in (["checkout", "main"], ["pull", "--ff-only"]):
             proc = _run_git(args, cwd=repo_path, logger=logger)
             if proc.returncode != 0:
                 logger.error(
@@ -202,41 +211,34 @@ def ensure_worker_repo_clean_and_synced(
         return True
 
     if not git_dir.is_dir():
-        if not _reclone_missing_repo():
+        logger.info("Git preflight: repo missing or invalid; performing fresh clone.")
+        if not _fresh_clone():
             return False
+    else:
+        status = _run_git(["status", "--porcelain"], cwd=repo_path, logger=logger)
+        if status.returncode != 0:
+            logger.error(
+                "Git preflight: `git status` failed in %s; skipping Codex run.",
+                repo_path,
+            )
+            return False
+        if status.stdout.strip():
+            logger.info(
+                "Git preflight: repo dirty; removing and recloning to discard local changes."
+            )
+            if not _fresh_clone():
+                return False
 
-    fetch = _run_git(["fetch", "--prune"], cwd=repo_path, logger=logger)
-    if fetch.returncode != 0:
-        logger.error(
-            "Git preflight: `git fetch --prune` failed in %s; skipping Codex run.",
-            repo_path,
-        )
+    if not git_dir.is_dir():
+        # Fresh clone failed.
         return False
 
-    status = _run_git(["status", "--porcelain"], cwd=repo_path, logger=logger)
-    if status.returncode != 0:
-        logger.error(
-            "Git preflight: `git status` failed in %s; skipping Codex run.",
-            repo_path,
-        )
+    if not _checkout_main_and_pull():
         return False
 
-    if status.stdout.strip():
-        return _reset_and_clean()
-
-    pull = _run_git([
-        "pull",
-        "--rebase",
-        "--autostash",
-    ], cwd=repo_path, logger=logger)
-    if pull.returncode != 0:
-        logger.warning(
-            "Git preflight: git pull failed (rc=%s); attempting hard reset + clean.",
-            pull.returncode,
-        )
-        return _reset_and_clean()
-
-    logger.info("Git preflight: repo clean and synced; proceeding with Codex run.")
+    logger.info(
+        "Git preflight: repo clean, on main, and synced; proceeding with Codex run."
+    )
     return True
 
 
@@ -604,6 +606,7 @@ def start_jobs_from_running(
             git_owner=git_owner,
             repo_name=repo_name,
             branch_name=branch_name,
+            job_id=run_id,
             inbox_rel=prompt_rel,
             inbox_path=running_path,
             run_root=run_root,
@@ -757,13 +760,14 @@ class Job:
     git_owner: str
     repo_name: str
     branch_name: str
+    job_id: str
     inbox_rel: Path
     inbox_path: Path
     run_root: Path
     prompt_path: Path
 
 
-def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path, run_id: str) -> None:
+def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path) -> None:
     """
     Invoke the Codex CLI using the prompt file as the input prompt.
 
@@ -786,7 +790,7 @@ def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path, run_id: str) -> 
 
     env.update(
         {
-            "PV_RUN_ID": run_id,
+            "PV_RUN_ID": job.job_id,
             "PV_RUN_ROOT": str(run_root),
             "PV_PROMPT_FILE": str(prompt_path),
         }
@@ -825,13 +829,115 @@ def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path, run_id: str) -> 
         )
 
 
+def create_pr_for_job(job: Job, repo_dir: Path, logger: logging.Logger) -> None:
+    """
+    From a clean repo with Codex changes applied, create a branch, commit, push,
+    and open a GitHub PR.
+
+    This function must never raise; on failure it logs and returns so the
+    watcher can continue processing future jobs.
+    """
+
+    rc, out, err = run_cmd(["git", "status", "--porcelain"], cwd=repo_dir)
+    if rc != 0:
+        logger.error("PR: git status failed (rc=%s): %s\n%s", rc, out, err)
+        return
+
+    if not out.strip():
+        logger.info("PR: no changes detected, skipping PR creation.")
+        return
+
+    prompt_slug = (
+        job.inbox_rel.stem.replace(" ", "-").replace("_", "-").replace(".", "-")
+    )
+    timestamp = job.job_id
+    branch_name = f"codex/{prompt_slug}-{timestamp}"
+
+    logger.info("PR: preparing branch %s", branch_name)
+
+    rc, out, err = run_cmd(["git", "checkout", "main"], cwd=repo_dir)
+    if rc != 0:
+        logger.error("PR: git checkout main failed (rc=%s): %s\n%s", rc, out, err)
+        return
+
+    rc, out, err = run_cmd(["git", "pull", "--ff-only"], cwd=repo_dir)
+    if rc != 0:
+        logger.error("PR: git pull failed (rc=%s): %s\n%s", rc, out, err)
+        return
+
+    rc, out, err = run_cmd(["git", "checkout", "-b", branch_name], cwd=repo_dir)
+    if rc != 0:
+        logger.error(
+            "PR: git checkout -b %s failed (rc=%s): %s\n%s",
+            branch_name,
+            rc,
+            out,
+            err,
+        )
+        return
+
+    rc, out, err = run_cmd(["git", "add", "-A"], cwd=repo_dir)
+    if rc != 0:
+        logger.error("PR: git add -A failed (rc=%s): %s\n%s", rc, out, err)
+        return
+
+    title = f"Codex: {job.inbox_rel.name}"
+    body = textwrap.dedent(
+        f"""
+        Automated Codex run for prompt:
+
+        - Prompt file: `{job.inbox_rel.name}`
+        - Job ID: `{job.job_id}`
+
+        Generated by the local Prompt Valet runner.
+        """
+    ).strip()
+
+    commit_msg = f"{title} (job {job.job_id})"
+
+    rc, out, err = run_cmd(["git", "commit", "-m", commit_msg], cwd=repo_dir)
+    if rc != 0:
+        if "nothing to commit" in out.lower() or "nothing to commit" in err.lower():
+            logger.info("PR: nothing to commit after git add; skipping PR.")
+        else:
+            logger.error("PR: git commit failed (rc=%s): %s\n%s", rc, out, err)
+        return
+
+    rc, out, err = run_cmd(["git", "push", "-u", "origin", branch_name], cwd=repo_dir)
+    if rc != 0:
+        logger.error("PR: git push failed (rc=%s): %s\n%s", rc, out, err)
+        return
+
+    rc, out, err = run_cmd(
+        [
+            "gh",
+            "pr",
+            "create",
+            "--title",
+            title,
+            "--body",
+            body,
+            "--base",
+            "main",
+            "--head",
+            branch_name,
+        ],
+        cwd=repo_dir,
+    )
+    if rc != 0:
+        logger.error("PR: gh pr create failed (rc=%s): %s\n%s", rc, out, err)
+        return
+
+    logger.info("PR: successfully created PR for branch %s", branch_name)
+
+
 def process_job(job: Job) -> bool:
     """
     Run a single job end-to-end:
     - make sure repo is cloned
     - prepare job branch
     - run Codex
-    - (Codex prompt is responsible for commits/PRs)
+    - create a PR if Codex changed anything
     """
     repos_root = Path(CONFIG["repos_root"]).expanduser().resolve()
 
@@ -857,6 +963,7 @@ def process_job(job: Job) -> bool:
     prompt_path = Path(job.prompt_path)
     prompt_exists = prompt_path.exists()
 
+    codex_success = False
     log(
         "[prompt-valet] "
         f"run={run_root.name} repo={job.git_owner}/{job.repo_name} "
@@ -865,7 +972,14 @@ def process_job(job: Job) -> bool:
     )
 
     if prompt_exists:
-        run_codex_for_job(repo_dir, job, run_root, run_root.name)
+        try:
+            run_codex_for_job(repo_dir, job, run_root)
+            codex_success = True
+        except Exception:
+            logger.exception(
+                "Codex run failed for job %s; skipping PR.", job.job_id
+            )
+            raise
     else:
         log(
             "[prompt-valet] Warning: prompt copy missing in run directory; "
@@ -877,6 +991,15 @@ def process_job(job: Job) -> bool:
             "referenced inbox paths or moved itself. Execution continued "
             "safely.\n"
         )
+        codex_success = True
+
+    if codex_success:
+        try:
+            create_pr_for_job(job, repo_dir, logger)
+        except Exception:
+            logger.exception(
+                "Unhandled exception during PR creation; continuing anyway."
+            )
 
     return True
 

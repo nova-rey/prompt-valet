@@ -24,10 +24,19 @@ Prompt Valet brings the same workflow fully on-premise:
 The Codex runner keeps a local worker clone of each target GitHub repo on the runner host. This clone is **disposable** and treated as an implementation detail:
 
 - Before each run, the watcher ensures the worker repo is a clean checkout of the configured branch.
-- If the worker repo has local changes or untracked files, the watcher **automatically resets it** to `origin/<branch>` and runs `git clean -fdx` to remove any stray files.
+- If the worker repo has local changes or untracked files, the watcher replaces the working copy entirely with a fresh clone to discard local edits.
 - If the repo cannot be repaired (e.g. Git fetch/reset fails), the run is skipped and the error is logged.
 
 Manual edits in the worker clone are unsupported and will be overwritten. The GitHub repository is the single source of truth.
+
+### codex-watcher.service lifecycle
+
+- The systemd service watches `/srv/prompt-valet/inbox` for new prompts.
+- For each job, it clones a fresh copy of the target repository into `/srv/repos/<owner>/<name>`, destroying any previous working copy.
+- Codex runs against that clean checkout.
+- If the run produces changes, the watcher creates a branch, commits, pushes, and opens a GitHub PR via `gh`.
+- The prompt file is moved into `processed/` (and then `finished/`) after the run completes.
+- There is no separate PR service today; references to `codex-pr.service` are obsolete.
 
 ## What Comes Next
 - The Phase 1 rename of `watcher.yaml` → `prompt-valet.yaml`
