@@ -2,16 +2,15 @@
 
 Watcher now discards all uncommitted changes and untracked files on each run via `git reset --hard origin/main`. Any local-only modifications must be committed or stashed manually before restarting the service. All Codex-generated edits flow through PRs, so no runtime-local changes should ever be required.
 
-### `git_repo_path` (required)
+### Repo resolution per prompt
 
-`git_repo_path` is the **only** location `codex_watcher` will use for Git operations.
+Watcher now resolves the target Git repository for **each prompt** based on its inbox path and the configured `repos_root`.
 
-- It must be set to the root of the Git clone that Codex will modify and open PRs against.
-- The directory **must** contain a `.git` folder.
-- On startup, and before processing any prompts, watcher will:
-
-  1. Verify that `git_repo_path` is a Git repo.
+- Expected inbox layout: `inbox_root/<git_owner>/<repo_name>/.../<prompt>.md`.
+- Derived repo root: `repos_root/<git_owner>/<repo_name>` (must contain `.git`).
+- For every prompt before execution, watcher will:
+  1. Verify the derived repo is a Git repo.
   2. Run `git fetch origin`.
   3. Run `git reset --hard origin/main`.
 
-If `git_repo_path` is missing or not a Git repository, the watcher will log an error and abort prompt execution rather than guessing a path or continuing with an inconsistent state.
+If the derived repo is missing or not a Git repository, prompt execution fails fast instead of guessing a location.

@@ -29,9 +29,12 @@ tree_builder:
   # one canonical place.
   scan_interval_seconds: 60
 
-# Root of the Git clone that Codex will operate on.
-# This must contain a .git directory.
-git_repo_path: "/srv/prompt-valet-repo"
+inbox: "/srv/prompt-valet/inbox"
+processed: "/srv/prompt-valet/processed"
+
+# Root folder where all git clones live, structured as:
+#   <repos_root>/<git_owner>/<repo_name>
+repos_root: "/srv/prompt-valet/repos"
 
 watcher:
   # If true, missing repos under /srv/repos/<repo> will be auto-cloned

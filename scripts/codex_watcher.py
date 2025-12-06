@@ -45,11 +45,9 @@ except ImportError as exc:  # pragma: no cover
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "inbox": {
-        "root": "/srv/prompt-valet/inbox",
-        "processed_root": "/srv/prompt-valet/processed",
-    },
-    "git_repo_path": "/srv/prompt-valet-repo",
+    "inbox": "/srv/prompt-valet/inbox",
+    "processed": "/srv/prompt-valet/processed",
+    "repos_root": "/srv/prompt-valet/repos",
     "watcher": {
         "auto_clone_missing_repos": True,
         "git_default_owner": "nova-rey",
@@ -63,7 +61,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 # Simple global-ish config; populated in main()
 CONFIG: Dict[str, Any] = {}
-GIT_REPO_PATH: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -117,23 +114,57 @@ def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.Complete
     return proc
 
 
-def ensure_repo_cloned(repo_root: Path, repo_name: str) -> Path:
+def derive_repo_root_from_prompt(config: dict, prompt_path: str) -> Path:
     """
-    Ensure /srv/repos/<repo_name> exists and is a git clone.
+    Given the config and the full path to a prompt file under the inbox tree,
+    derive the corresponding git repo root.
+
+    Expected layout:
+        inbox_root/<git_owner>/<repo_name>/.../<prompt>.md
+
+    The repo root is:
+        repos_root/<git_owner>/<repo_name>
+    """
+    inbox_root = Path(config["inbox"]).expanduser().resolve()
+    repos_root = Path(config["repos_root"]).expanduser().resolve()
+
+    prompt = Path(prompt_path).expanduser().resolve()
+    rel = prompt.relative_to(inbox_root)
+
+    # rel is like: <git_owner>/<repo_name>/.../<prompt>.md
+    parts = rel.parts
+    if len(parts) < 2:
+        raise RuntimeError(
+            f"Cannot derive repo from prompt path {prompt}: expected at least "
+            "<git_owner>/<repo_name>/..., got {rel}"
+        )
+
+    git_owner = parts[0]
+    repo_name = parts[1]
+
+    repo_root = repos_root / git_owner / repo_name
+    return repo_root
+
+
+def ensure_repo_cloned(repo_root: Path, git_owner: str, repo_name: str) -> Path:
+    """
+    Ensure <repo_root>/<git_owner>/<repo_name> exists and is a git clone.
 
     If missing and auto_clone_missing_repos is True, clone from origin built
     from config (owner/host/protocol).
     """
-    target = repo_root / repo_name
+    target = repo_root / git_owner / repo_name
     if target.is_dir() and (target / ".git").is_dir():
         return target
 
     watcher_cfg = CONFIG.get("watcher", {})
     auto_clone = bool(watcher_cfg.get("auto_clone_missing_repos", True))
     if not auto_clone:
-        raise RuntimeError(f"Repo {repo_name!r} missing and auto_clone_disabled")
+        raise RuntimeError(
+            f"Repo {git_owner!r}/{repo_name!r} missing and auto_clone_disabled"
+        )
 
-    owner = watcher_cfg.get("git_default_owner", "nova-rey")
+    owner = git_owner or watcher_cfg.get("git_default_owner", "nova-rey")
     host = watcher_cfg.get("git_default_host", "github.com")
     proto = watcher_cfg.get("git_protocol", "https")
 
@@ -195,15 +226,14 @@ def run_git_sync(repo_path: str) -> None:
 
     if not git_dir.is_dir():
         print(
-            f"[codex_watcher] ERROR: git_repo_path is not a Git repository: {repo} "
+            f"[codex_watcher] ERROR: repo path is not a Git repository: {repo} "
             "(.git directory not found)."
         )
         raise RuntimeError(
-            "Git synchronization failed: configured git_repo_path is not a Git repository."
+            "Git synchronization failed: target directory is not a Git repository."
         )
 
     try:
-        # Fetch latest from origin
         subprocess.run(
             ["git", "fetch", "origin"],
             cwd=str(repo),
@@ -211,8 +241,6 @@ def run_git_sync(repo_path: str) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-
-        # Hard reset to origin/main
         subprocess.run(
             ["git", "reset", "--hard", "origin/main"],
             cwd=str(repo),
@@ -220,12 +248,10 @@ def run_git_sync(repo_path: str) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-
         print(
             f"[codex_watcher] Repository synchronized at {repo} "
             "(fetch + reset --hard origin/main)."
         )
-
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode(errors="ignore") if getattr(e, "stderr", None) else str(e)
         print("[codex_watcher] ERROR: Git synchronization failed.")
@@ -265,8 +291,9 @@ def load_config() -> Dict[str, Any]:
             )
             loaded_path = "<defaults>"
 
-    inbox_root = Path(cfg["inbox"]["root"])
-    processed_root = Path(cfg["inbox"]["processed_root"])
+    inbox_root = Path(cfg["inbox"])
+    processed_root = Path(cfg["processed"])
+    repos_root = Path(cfg["repos_root"])
     watcher_cfg = cfg.get("watcher", {})
 
     log(
@@ -274,6 +301,7 @@ def load_config() -> Dict[str, Any]:
         f"{loaded_path} "
         f"inbox={inbox_root} "
         f"processed={processed_root} "
+        f"repos_root={repos_root} "
         f"git_owner={watcher_cfg.get('git_default_owner')} "
         f"git_host={watcher_cfg.get('git_default_host')} "
         f"git_protocol={watcher_cfg.get('git_protocol')} "
@@ -290,6 +318,7 @@ def load_config() -> Dict[str, Any]:
 
 @dataclass
 class Job:
+    git_owner: str
     repo_name: str
     branch_name: str
     prompt_path: Path
@@ -316,12 +345,13 @@ class InboxHandler(FileSystemEventHandler):
             return
 
         parts = list(rel.parts)
-        if len(parts) < 3:
-            log(f"Path {rel!s} does not look like repo/branch/file, skipping.")
+        if len(parts) < 4:
+            log(f"Path {rel!s} does not look like owner/repo/branch/file, skipping.")
             return
 
-        repo_name, branch_name = parts[0], parts[1]
+        git_owner, repo_name, branch_name = parts[0], parts[1], parts[2]
         job = Job(
+            git_owner=git_owner,
             repo_name=repo_name,
             branch_name=branch_name,
             prompt_path=path,
@@ -338,16 +368,6 @@ class InboxHandler(FileSystemEventHandler):
         if event.is_directory:
             return
         self._maybe_enqueue(Path(event.dest_path))
-
-
-# ---------------------------------------------------------------------------
-# Job execution
-# ---------------------------------------------------------------------------
-
-
-def build_repo_root() -> Path:
-    # We standardize on /srv/repos as the local clone root.
-    return Path("/srv/repos")
 
 
 def run_codex_for_job(
@@ -421,21 +441,23 @@ def process_job(job: Job) -> None:
     - (Codex prompt is responsible for commits/PRs)
     - move prompt to processed/
     """
-    inbox_root = Path(CONFIG["inbox"]["root"])
-    processed_root = Path(CONFIG["inbox"]["processed_root"])
-    repo_root = build_repo_root()
+    inbox_root = Path(CONFIG["inbox"])
+    processed_root = Path(CONFIG["processed"])
+    repos_root = Path(CONFIG["repos_root"]).expanduser().resolve()
 
-    repo_dir = ensure_repo_cloned(repo_root, job.repo_name)
+    original_prompt_path = job.prompt_path
+    repo_dir = derive_repo_root_from_prompt(CONFIG, str(original_prompt_path))
+    ensure_repo_cloned(repos_root, job.git_owner, job.repo_name)
+
+    run_git_sync(str(repo_dir))
 
     job_branch = job.branch_name
     prepare_branch(repo_dir, job_branch, base_branch="main")
 
     run_id = dt.datetime.utcnow().strftime("%Y%m%d-%H%M-%S")
-    run_root = processed_root / job.repo_name / job.branch_name / run_id
+    run_root = processed_root / job.git_owner / job.repo_name / job.branch_name / run_id
     run_root.mkdir(parents=True, exist_ok=True)
     prompt_path = run_root / "prompt.md"
-
-    original_prompt_path = job.prompt_path
 
     try:
         shutil.move(original_prompt_path, prompt_path)
@@ -452,7 +474,7 @@ def process_job(job: Job) -> None:
 
     log(
         "[prompt-valet] "
-        f"run={run_id} repo={job.repo_name} branch={job.branch_name} "
+        f"run={run_id} repo={job.git_owner}/{job.repo_name} branch={job.branch_name} "
         f"prompt={prompt_path} processed={run_root}"
     )
 
@@ -492,7 +514,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
 
 
 def main(argv: Optional[list] = None) -> int:
-    global CONFIG, GIT_REPO_PATH
+    global CONFIG
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -504,25 +526,11 @@ def main(argv: Optional[list] = None) -> int:
 
     CONFIG = load_config()
 
-    GIT_REPO_PATH = CONFIG.get("git_repo_path")
-    if not GIT_REPO_PATH:
-        raise RuntimeError(
-            "codex_watcher: 'git_repo_path' is required in the configuration. "
-            "It must point to the root of the Git clone used for Codex runs."
-        )
-
-    GIT_REPO_PATH = str(Path(GIT_REPO_PATH).expanduser().resolve())
-
-    try:
-        run_git_sync(GIT_REPO_PATH)
-    except RuntimeError as exc:
-        log(str(exc))
-        return 1
-
-    inbox_root = Path(CONFIG["inbox"]["root"])
-    processed_root = Path(CONFIG["inbox"]["processed_root"])
+    inbox_root = Path(CONFIG["inbox"])
+    processed_root = Path(CONFIG["processed"])
     inbox_root.mkdir(parents=True, exist_ok=True)
     processed_root.mkdir(parents=True, exist_ok=True)
+    Path(CONFIG["repos_root"]).expanduser().resolve().mkdir(parents=True, exist_ok=True)
 
     job_queue: "queue.Queue[Job]" = queue.Queue()
     stop_event = threading.Event()
@@ -535,10 +543,10 @@ def main(argv: Optional[list] = None) -> int:
             except ValueError:
                 continue
             parts = list(rel.parts)
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
-            repo_name, branch_name = parts[0], parts[1]
-            job_queue.put(Job(repo_name, branch_name, path))
+            git_owner, repo_name, branch_name = parts[0], parts[1], parts[2]
+            job_queue.put(Job(git_owner, repo_name, branch_name, path))
 
         # Process synchronously
         while not job_queue.empty():

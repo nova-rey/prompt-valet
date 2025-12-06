@@ -37,13 +37,21 @@ The purpose of this file is to reflect **current truth**, not the future rename.
 - `scan_interval_seconds` (integer, default: `60`)
   - Placeholder for future daemon mode; today the tree-builder runs once but keeps this setting for a potential loop.
 
-### `git_repo_path`
-- Default: `/srv/prompt-valet-repo`
-- Root of the Git clone Codex will operate on. Must contain a `.git` directory.
+### `inbox`
+- Default: `/srv/prompt-valet/inbox`
+- Root directory watched for incoming prompt files.
+
+### `processed`
+- Default: `/srv/prompt-valet/processed`
+- Destination for processed prompts and run outputs.
+
+### `repos_root`
+- Default: `/srv/prompt-valet/repos`
+- Root folder containing Git clones, structured as `<repos_root>/<git_owner>/<repo_name>`.
 
 ### `watcher`
 - `auto_clone_missing_repos` (bool, default: `true`)
-  - When a prompt arrives under `inbox/<repo>`, the watcher will auto-clone `/srv/repos/<repo>` if it does not exist.
+  - When a prompt arrives under `inbox/<owner>/<repo>`, the watcher will auto-clone `/srv/repos/<owner>/<repo>` if it does not exist.
 - `git_default_owner` (string, default: `"owner"`)
   - The GitHub handle used to construct clone URLs when auto-cloning.
 - `git_default_host` (string, default: `"github.com"`)
