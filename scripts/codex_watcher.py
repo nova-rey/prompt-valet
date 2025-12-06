@@ -83,13 +83,17 @@ def log(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def git_run(args, cwd: Path, allow_failure: bool = False) -> subprocess.CompletedProcess:
+def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.CompletedProcess:
     """
     Run a git command, logging stdout/stderr.
 
     If allow_failure is False, raise RuntimeError on non-zero return code.
     """
-    cmd = ["git"] + list(args)
+    normalized_args = list(args)
+    if normalized_args and normalized_args[0] == "git":
+        normalized_args = normalized_args[1:]
+
+    cmd = ["git"] + normalized_args
     log(f"RUN: {cmd!r} (cwd={cwd})")
     proc = subprocess.run(
         cmd,
@@ -104,9 +108,10 @@ def git_run(args, cwd: Path, allow_failure: bool = False) -> subprocess.Complete
         log(f"STDERR:\n{proc.stderr.rstrip()}")
 
     if proc.returncode != 0 and not allow_failure:
-        raise RuntimeError(
-            f"Command failed with code {proc.returncode}: {cmd!r}"
-        )
+        err_msg = f"Command failed with code {proc.returncode}: {cmd!r}"
+        if proc.stderr:
+            err_msg += f" stderr: {proc.stderr.rstrip()}"
+        raise RuntimeError(err_msg)
     return proc
 
 
@@ -133,8 +138,21 @@ def ensure_repo_cloned(repo_root: Path, repo_name: str) -> Path:
     url = f"{proto}://{host}/{owner}/{repo_name}.git"
     log(f"Cloning missing repo {repo_name!r} from {url!r} into {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    git_run(["clone", url, str(target)], cwd=repo_root)
+    run_git(["clone", url, str(target)], cwd=repo_root)
     return target
+
+
+def ensure_agent_branch(repo_dir: Path, job_branch: str) -> None:
+    """Create the agent branch if missing, otherwise switch to it."""
+    try:
+        run_git(["checkout", "-b", job_branch], cwd=repo_dir)
+    except RuntimeError as exc:
+        msg = str(exc)
+        stderr = getattr(exc, "stderr", "")
+        if "already exists" in msg or "already exists" in stderr:
+            run_git(["checkout", job_branch], cwd=repo_dir)
+        else:
+            raise
 
 
 def prepare_branch(
@@ -147,33 +165,20 @@ def prepare_branch(
 
     - Fetches origin.
     - Checks out and fast-forwards base_branch.
-    - Creates (or reuses + resets) job_branch from base_branch.
+    - Creates job_branch from base_branch if missing, otherwise reuses it.
     """
     # Ensure repo exists & has remotes (non-fatal if this fails)
-    git_run(["remote", "-v"], cwd=repo_dir, allow_failure=True)
+    run_git(["remote", "-v"], cwd=repo_dir, allow_failure=True)
 
     # Fetch latest and get onto base branch
-    git_run(["fetch", "origin"], cwd=repo_dir)
-    git_run(["checkout", base_branch], cwd=repo_dir)
-    git_run(["pull", "origin", base_branch], cwd=repo_dir)
+    run_git(["fetch", "origin"], cwd=repo_dir)
+    run_git(["checkout", base_branch], cwd=repo_dir)
+    run_git(["pull", "origin", base_branch], cwd=repo_dir)
 
-    # Create the job branch from the base branch.
-    # If the branch already exists (for example from a prior run that
-    # crashed after creating it), reuse it but hard-reset it to the base
-    # branch so we always start clean.
-    try:
-        git_run(["checkout", "-b", job_branch], cwd=repo_dir)
-    except RuntimeError as exc:
-        msg = str(exc)
-        if "already exists" in msg:
-            log(
-                f"Branch {job_branch!r} already exists; reusing it and resetting "
-                f"to {base_branch!r}."
-            )
-            git_run(["checkout", job_branch], cwd=repo_dir)
-            git_run(["reset", "--hard", base_branch], cwd=repo_dir)
-        else:
-            raise
+    if job_branch == base_branch:
+        return
+
+    ensure_agent_branch(repo_dir, job_branch)
 
 
 # ---------------------------------------------------------------------------
