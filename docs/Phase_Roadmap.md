@@ -23,3 +23,4 @@ Standardize the filesystem and configuration layout, document the current archit
 - Move into canonical location (`/srv/prompt-valet/config/`).
 - Update watcher + tree-builder scripts to consume the new name.
 - Add improved logging of config path and key settings.
+- [x] Add git preflight guard to Codex watcher (clean tree + `git pull --ff-only`).

@@ -16,6 +16,7 @@ This version:
 
 import argparse
 import datetime as dt
+import logging
 import os
 import queue
 import shutil
@@ -26,7 +27,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple
 
 import yaml  # type: ignore
 
@@ -82,6 +83,90 @@ def log(msg: str) -> None:
 # ---------------------------------------------------------------------------
 # Git helpers
 # ---------------------------------------------------------------------------
+
+
+def _run_git(
+    args: Sequence[str],
+    *,
+    cwd: Path,
+    logger: logging.Logger,
+    check: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run a git command in `cwd` and capture output.
+
+    If `check` is True, non–zero returncodes are logged and raised.
+    Otherwise, the caller must examine `returncode`.
+    """
+
+    cmd = ["git", *args]
+    logger.debug("Running git command: %s (cwd=%s)", " ".join(cmd), cwd)
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        logger.warning(
+            "git command failed (rc=%s): %s\nstdout:\n%s\nstderr:\n%s",
+            proc.returncode,
+            " ".join(cmd),
+            proc.stdout,
+            proc.stderr,
+        )
+        if check:
+            proc.check_returncode()
+    return proc
+
+
+def ensure_repo_clean_and_synced(repo_path: Path, logger: logging.Logger) -> bool:
+    """Ensure the git repo is clean and up to date before running Codex.
+
+    Returns True if it is safe to proceed. Returns False and logs an error
+    if the working tree is dirty or cannot fast–forward to origin.
+    """
+
+    status = _run_git(["status", "--porcelain"], cwd=repo_path, logger=logger)
+    if status.returncode != 0:
+        logger.error(
+            "Refusing to run Codex: `git status` failed in %s. "
+            "Resolve the git state manually before rerunning.",
+            repo_path,
+        )
+        return False
+
+    if status.stdout.strip():
+        logger.error(
+            "Refusing to run Codex: repository %s has local changes or untracked files.\n"
+            "Resolve or commit them before the watcher runs.\n"
+            "Hint: run `git status` in %s.",
+            repo_path,
+            repo_path,
+        )
+        return False
+
+    fetch = _run_git(["fetch", "origin"], cwd=repo_path, logger=logger)
+    if fetch.returncode != 0:
+        logger.error(
+            "Refusing to run Codex: `git fetch origin` failed in %s. "
+            "Check network and remote configuration.",
+            repo_path,
+        )
+        return False
+
+    pull = _run_git(["pull", "--ff-only"], cwd=repo_path, logger=logger)
+    if pull.returncode != 0:
+        logger.error(
+            "Refusing to run Codex: `git pull --ff-only` failed in %s. "
+            "The branch likely cannot fast–forward. Manually resolve the "
+            "divergence before enabling the watcher.",
+            repo_path,
+        )
+        return False
+
+    logger.info("Git preflight OK: %s is clean and up to date.", repo_path)
+    return True
 
 
 def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.CompletedProcess:
@@ -711,9 +796,18 @@ def process_job(job: Job) -> None:
     """
     repos_root = Path(CONFIG["repos_root"]).expanduser().resolve()
 
+    logger = logging.getLogger("codex_watcher")
+
     original_prompt_path = Path(CONFIG["inbox"]) / job.inbox_rel
     repo_dir = derive_repo_root_from_prompt(CONFIG, str(original_prompt_path))
-    ensure_repo_cloned(repos_root, job.git_owner, job.repo_name)
+    repo_dir = ensure_repo_cloned(repos_root, job.git_owner, job.repo_name)
+
+    if not ensure_repo_clean_and_synced(repo_dir, logger):
+        logger.error(
+            "Skipping Codex run for %s because git preflight failed.",
+            job.prompt_path,
+        )
+        raise RuntimeError("Git preflight failed; skipping Codex run.")
 
     run_git_sync(str(repo_dir))
 
