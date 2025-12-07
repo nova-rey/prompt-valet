@@ -1,0 +1,11 @@
+[Unit]
+Description=Copyparty — Prompt Valet Inbox
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/env copyparty serve --root /srv/prompt-valet/inbox --port 3923 --log-dir /srv/prompt-valet/logs/copyparty --readonly
+WorkingDirectory=/srv/prompt-valet
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

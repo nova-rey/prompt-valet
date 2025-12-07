@@ -1,24 +1,13 @@
-# Prompt Valet — Phase 1 Roadmap (Revised)
+# Prompt Valet Roadmap (Phase 2)
 
-## Phase Goal
-Standardize the filesystem and configuration layout, document the current architecture, and lock in `/srv/prompt-valet/config/prompt-valet.yaml` as the canonical runtime config.
+## Phase 2 — Installer & Deployment
 
-## Checkpoints
+### P2·C1 — Installer Spec & Contract (Unified A/B/C)
+- **Analysis (Block A)** — completed; `docs/analysis/P2-C1-analysis.md` captures the repo baseline and derived contract assumptions.
+- **Implementation (Block B)** — completed; `docs/installer_contract.md` now defines the canonical installer behavior.
+- **Verification (Block C)** — completed; formatting/lint checks verified the contract document.
 
-### P1·C1 — Docs Foundation (Mini-Push)
-- Create `/docs` directory.
-- Populate seed documentation:
-  - Bible.md
-  - Design_Philosophy.md
-  - Architecture.md
-  - Filesystem.md
-  - Config_Spec.md
-  - Prompt_Valet_Overview.md
-  - Phase_Roadmap.md
-- Document the actual current behavior as deployed.
-- No code edits; documentation only.
-
--### P1·C2 — Config Rename (ABC)
-- Ensure `/srv/prompt-valet/config/prompt-valet.yaml` is the canonical runtime config.
-- Update watcher + tree-builder scripts to consume that path and log the config path plus key settings.
-- [x] Add git preflight guard to Codex watcher (clean tree + `git pull --ff-only`).
+### P2·C2 — Non-interactive Installer Implementation (Unified A/B/C)
+- **Analysis (Block A)** — completed; `docs/analysis/P2-C2-analysis.md` records the Phase 2 requirements, directory expectations, and environment API.
+- **Implementation (Block B)** — completed; `install_prompt_valet.sh`, the four systemd unit templates, and refreshed docs now encode the deployment steps for the watcher, tree builder, and optional file server.
+- **Verification (Block C)** — completed; `bash -n install_prompt_valet.sh`, `systemd-analyze verify` on the units, and `python3 -m markdown` over the updated docs all succeeded (with only the expected netplan warning described in notes).
