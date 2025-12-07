@@ -1,0 +1,11 @@
+[Unit]
+Description=Prompt Valet — Copyparty File Server
+After=network-online.target
+
+[Service]
+WorkingDirectory=/srv/prompt-valet
+ExecStart=/usr/bin/env copyparty serve --name "Prompt Valet Inbox" --chdir /srv/prompt-valet/inbox -i 0.0.0.0 -p __PV_FILE_SERVER_PORT__ -v /srv/prompt-valet/inbox:/inbox:r -v /srv/prompt-valet/processed:/processed:r
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

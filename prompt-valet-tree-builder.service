@@ -1,0 +1,9 @@
+[Unit]
+Description=Prompt Valet — Inbox Tree Builder
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 /srv/prompt-valet/scripts/rebuild_inbox_tree.py
+
+[Install]
+WantedBy=multi-user.target

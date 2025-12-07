@@ -1,0 +1,11 @@
+[Unit]
+Description=Prompt Valet — Watcher
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/env python3 /srv/prompt-valet/scripts/codex_watcher.py
+WorkingDirectory=/srv/prompt-valet
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
