@@ -19,12 +19,7 @@ tree_builder:
   branch_name_blacklist:
     - "HEAD"
 
-  # Legacy hints (not actively enforced yet).
-  placeholder_branches:
-    - "main"
-    - "devel"
-    - "api"
-    - "phase5"
+
   scan_interval_seconds: 60
 
 # Watcher-specific options used by both scripts.
