@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import subprocess
 import textwrap
 from pathlib import Path
@@ -27,8 +28,10 @@ def _write_config(
     owner: str = "owner",
     host: Path | str | None = None,
     protocol: str = "file",
+    greedy_inboxes: bool = False,
 ) -> Path:
     host_value = host or remote_root
+    greedy_value = "true" if greedy_inboxes else "false"
     config_text = textwrap.dedent(
         f"""
         inbox: "{inbox}"
@@ -46,6 +49,7 @@ def _write_config(
           branch_blacklist: []
           branch_name_blacklist:
             - "HEAD"
+          greedy_inboxes: {greedy_value}
         """
     ).strip()
     path.write_text(config_text, encoding="utf-8")
@@ -314,3 +318,125 @@ def test_upstream_enabled_uses_config_owner(
 
     assert targets, "Upstream discovery should be attempted when config exists"
     assert any(f"/{owner}/" in target for target in targets)
+
+
+def test_greedy_inboxes_expands_repo_set_from_owner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inbox = tmp_path / "inbox"
+    repos_root = tmp_path / "repos"
+    local_repo = repos_root / "CrapsSim-Control"
+    local_repo.mkdir(parents=True, exist_ok=True)
+    (local_repo / ".git").mkdir(parents=True, exist_ok=True)
+
+    config_path = _write_config(
+        tmp_path / "prompt-valet.yaml",
+        inbox,
+        repos_root,
+        tmp_path / "remote",
+        greedy_inboxes=True,
+    )
+    _configure_paths(monkeypatch, config_path, inbox, repos_root)
+
+    discovered: list[tuple[str, str, str, str | None]] = []
+
+    def fake_discover(
+        owner: str, host: str | None, protocol: str | None, token_env: str | None = None
+    ) -> list[str]:
+        discovered.append((owner, host, protocol, token_env))
+        return ["CrapsSim-Control", "nova-process"]
+
+    monkeypatch.setattr(
+        rebuild_inbox_tree,
+        "discover_upstream_repos_for_owner",
+        fake_discover,
+    )
+
+    def fake_ls_remote(
+        target: str, heads_only: bool = True, cwd: Path | None = None
+    ) -> tuple[bool, list[str], str]:
+        return True, ["main"], ""
+
+    monkeypatch.setattr(rebuild_inbox_tree, "run_git_ls_remote", fake_ls_remote)
+
+    rebuild_inbox_tree.main()
+
+    assert len(discovered) == 1, "Should call upstream discovery exactly once"
+    assert (inbox / "CrapsSim-Control" / "main").is_dir()
+    assert (inbox / "nova-process" / "main").is_dir()
+
+
+def test_greedy_inboxes_disabled_does_not_call_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inbox = tmp_path / "inbox"
+    repos_root = tmp_path / "repos"
+
+    config_path = _write_config(
+        tmp_path / "prompt-valet.yaml",
+        inbox,
+        repos_root,
+        tmp_path / "remote",
+        greedy_inboxes=False,
+    )
+    _configure_paths(monkeypatch, config_path, inbox, repos_root)
+
+    def fail_discover(
+        owner: str, host: str | None, protocol: str | None, token_env: str | None = None
+    ) -> list[str]:
+        raise AssertionError("discover_upstream_repos_for_owner should not be called")
+
+    monkeypatch.setattr(
+        rebuild_inbox_tree,
+        "discover_upstream_repos_for_owner",
+        fail_discover,
+    )
+
+    def fake_ls_remote(
+        target: str, heads_only: bool = True, cwd: Path | None = None
+    ) -> tuple[bool, list[str], str]:
+        return True, ["main"], ""
+
+    monkeypatch.setattr(rebuild_inbox_tree, "run_git_ls_remote", fake_ls_remote)
+
+    rebuild_inbox_tree.main()
+
+    assert not (inbox / "nova-process").exists()
+
+
+def test_greedy_inboxes_skips_discovery_when_upstream_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inbox = tmp_path / "inbox"
+    repos_root = tmp_path / "repos"
+    config_path = tmp_path / "prompt-valet.yaml"
+
+    cfg = copy.deepcopy(rebuild_inbox_tree.DEFAULT_CONFIG)
+    cfg["tree_builder"]["greedy_inboxes"] = True
+
+    monkeypatch.setattr(rebuild_inbox_tree, "load_config", lambda: (cfg, False))
+    _configure_paths(monkeypatch, config_path, inbox, repos_root)
+
+    def fail_discover(
+        owner: str, host: str | None, protocol: str | None, token_env: str | None = None
+    ) -> list[str]:
+        raise AssertionError(
+            "Greedy discovery should not run when upstream is disabled."
+        )
+
+    monkeypatch.setattr(
+        rebuild_inbox_tree,
+        "discover_upstream_repos_for_owner",
+        fail_discover,
+    )
+
+    def fake_ls_remote(
+        target: str, heads_only: bool = True, cwd: Path | None = None
+    ) -> tuple[bool, list[str], str]:
+        return True, ["main"], ""
+
+    monkeypatch.setattr(rebuild_inbox_tree, "run_git_ls_remote", fake_ls_remote)
+
+    rebuild_inbox_tree.main()
+
+    assert not (inbox / "nova-process").exists()
