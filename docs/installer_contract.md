@@ -94,3 +94,8 @@ After dropping or removing units, the installer must run `systemctl daemon-reloa
 3. Confirm `/srv/prompt-valet/config/prompt-valet.yaml` follows the schema above after running the installer.
 4. Verify `copyparty.service` is only enabled when `PV_FILE_SERVER_MODE=copyparty` and that the service is disabled/masked otherwise.
 5. Document any divergence from these rules and resolve it before declaring Block C complete.
+
+## How Phase 3 Wizard & Phase 4 TUI integrate with the installer
+- The Wizard and TUI wrap `install_prompt_valet.sh` instead of reimplementing the installer logic. They prepare the environment (setting `PV_*` variables such as `PV_GIT_OWNER`, `PV_GIT_HOST`, `PV_FILE_SERVER_MODE`, `PV_VALIDATE_ONLY`, and any overrides for `PV_RUNNER_CMD`/`PV_RUNNER_EXTRA`) and then execute the same script so every deployment goes through the deterministic, idempotent path.
+- Because the installer already manages package installation, configuration serialization, service/unit deployment, and Copyparty activation, the higher-level UIs simply surface the configuration choices, run `install_prompt_valet.sh`, and consume the exit code or dry-run output. This keeps the operational surface centralized and prevents duplicated logic.
+- The Wizard/TUI can leverage `PV_VALIDATE_ONLY=1` to preview planned actions, then rerun without the flag for a real install. They can also observe the installer’s logging (including the `dry-run:`/`DRY RUN:` prefixes) to build a preview step that matches how the script behaves when executed manually.
