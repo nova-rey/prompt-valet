@@ -6,30 +6,28 @@ Rebuilds the Codex inbox tree under /srv/prompt-valet/inbox.
 
 Behavior (one-shot sync):
 
-1) For each real git repo under /srv/repos:
-   - Discover remote branches.
-   - Filter them according to tree_builder.branch_mode /
+1) For each git repo under /srv/repos or existing inbox root:
+   - Discover remote branches from the repo's origin remote or from
+     the upstream host (via git ls-remote).
+   - Filter branches according to tree_builder.branch_mode /
      branch_whitelist / branch_blacklist.
    - Create inbox subdirectories for each "wanted" branch:
          /srv/prompt-valet/inbox/<repo_key>/<branch>/
+   - Remove inbox branch directories that no longer map to upstream
+     branches.
 
-2) For every existing inbox branch directory under
-       /srv/prompt-valet/inbox/<repo_key>/<branch>/
-   that does NOT correspond to a real git branch name:
-       - Delete the entire branch directory.
-       - Write an ERROR.md marker explaining what happened.
+2) For inbox roots without a local clone:
+   - Validate the repo against the upstream git host using watcher
+     config (owner/host/protocol).
+   - If the repo exists upstream, reconcile branch folders against
+     upstream heads.
+   - If the repo does not exist upstream, delete the inbox root and
+     write an ERROR.md marker.
 
-3) For every top-level inbox root under /srv/prompt-valet/inbox
-   that does NOT correspond to a real git repo in /srv/repos:
-       - Delete the entire inbox root.
-       - Recreate it with a single ERROR.md explaining that the
-         repo key is unknown.
-
-This keeps the inbox tree tightly aligned with real repos/branches
-and aggressively cleans up stale or typo'd folders.
-
-A background systemd timer can run this periodically to provide
-"eventual consistency" for branch lifecycles.
+This keeps the inbox tree aligned with real repos/branches while also
+respecting repositories that only exist upstream. A background systemd
+timer can run this periodically to provide "eventual consistency" for
+branch lifecycles.
 
 Config (YAML):
 
@@ -70,7 +68,7 @@ import copy
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Iterable, Dict, Any, List
+from typing import Iterable, Dict, Any, List, Set, Tuple
 
 import yaml
 
@@ -97,8 +95,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "branch_whitelist": [],
         "branch_blacklist": [],
         "branch_name_blacklist": ["HEAD"],
-        "placeholder_branches": ["main", "devel", "api", "phase5"],  # legacy hint only
-        "greedy_inboxes": False,  # legacy hint only
         "scan_interval_seconds": 60,
     },
     "watcher": {
@@ -164,43 +160,83 @@ def is_git_repo(path: Path) -> bool:
     return (path / ".git").is_dir()
 
 
+def repo_missing_from_stderr(stderr: str) -> bool:
+    lowered = (stderr or "").lower()
+    tokens = (
+        "repository not found",
+        "does not appear to be a git repository",
+        "could not read from remote repository",
+        "repository does not exist",
+        "not found",
+    )
+    return any(tok in lowered for tok in tokens)
+
+
 def discover_repos(root: Path) -> Iterable[Path]:
-    """
-    Discover git repos directly under REPOS_ROOT.
-    """
+    """Discover git repos directly under REPOS_ROOT."""
     if not root.is_dir():
         log(f"Repos root {root} does not exist or is not a directory.")
         return []
     for child in sorted(root.iterdir()):
-        if child.is_dir() and is_git_repo(child):
+        if not child.is_dir():
+            continue
+        if is_git_repo(child):
             yield child
+            continue
+        for grandchild in sorted(child.iterdir()):
+            if grandchild.is_dir() and is_git_repo(grandchild):
+                yield grandchild
+
+
+def run_git_ls_remote(
+    target: str, *, heads_only: bool = True, cwd: Path | None = None
+) -> Tuple[bool, List[str], str]:
+    args = ["git", "ls-remote"]
+    if heads_only:
+        args.append("--heads")
+    args.append(target)
+
+    try:
+        result = subprocess.run(
+            args,
+            cwd=str(cwd) if cwd else None,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except Exception as exc:  # pragma: no cover - unexpected failure path
+        log(f"git ls-remote failed for {target}: {exc}")
+        return False, [], str(exc)
+
+    success = result.returncode == 0
+    if not success:
+        log(
+            "git ls-remote for "
+            f"{target} failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+    refs: List[str] = []
+    if success:
+        for line in result.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            ref = parts[1]
+            if heads_only and ref.startswith("refs/heads/"):
+                refs.append(ref[len("refs/heads/") :])
+            elif heads_only:
+                continue
+            else:
+                refs.append(ref)
+
+    return success, refs, result.stderr
 
 
 def list_remote_branches(repo_path: Path) -> List[str]:
-    """
-    Return a list of remote branch names (without 'origin/' prefix).
-    """
-    try:
-        result = subprocess.run(
-            ["git", "branch", "-r", "--format", "%(refname:short)"],
-            cwd=str(repo_path),
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        log(f"Failed to list remote branches for {repo_path}: {e}")
+    """Return a list of remote branch names (without 'origin/' prefix)."""
+    success, branches, _ = run_git_ls_remote("origin", heads_only=True, cwd=repo_path)
+    if not success:
+        log(f"Failed to list remote branches for {repo_path}")
         return []
-
-    branches: List[str] = []
-    for line in result.stdout.splitlines():
-        name = line.strip()
-        if not name:
-            continue
-        # Typically looks like "origin/main"; strip the "origin/" prefix if present.
-        if name.startswith("origin/"):
-            name = name[len("origin/") :]
-        branches.append(name)
     return branches
 
 
@@ -216,7 +252,6 @@ def filter_branches_for_inbox(
     Apply config-driven filters and path-safety rules to decide which
     branch names should get an inbox directory.
     """
-    # Drop any explicitly blacklisted-by-name branches (e.g., HEAD)
     filtered: List[str] = []
     for br in branches:
         if br in name_blacklist:
@@ -225,22 +260,13 @@ def filter_branches_for_inbox(
         filtered.append(br)
     branches = filtered
 
-    # Branch mode filters
     if branch_mode == "whitelist":
         wl = set(whitelist)
         branches = [b for b in branches if b in wl]
     elif branch_mode == "blacklist":
-        # blacklist entries are treated as prefixes
         bl_prefixes = tuple(blacklist)
         branches = [b for b in branches if not b.startswith(bl_prefixes)]
-    else:
-        # "all" -> no additional filtering
-        pass
 
-    # Path safety: branches that contain '/' can lead to weird nested
-    # directories or collisions. Unless explicitly whitelisted by name,
-    # we drop them and ask users to create a cleaner alias branch if
-    # they want inbox folders for them.
     safe: List[str] = []
     wl_set = set(whitelist)
     for br in branches:
@@ -263,13 +289,14 @@ def ensure_inbox_dir(repo_key: str, branch: str) -> Path:
 
 
 def remove_inbox_dir(path: Path, reason: str) -> None:
-    """
-    Remove an inbox branch directory and write an ERROR.md explaining why.
-    """
+    """Remove an inbox branch directory and write an ERROR.md explaining why."""
     if not path.is_dir():
         return
 
-    log(f"Inbox branch {path} has no matching git branch; resetting and dropping ERROR.md.")
+    log(
+        f"Removing inbox branch {path} because it no longer maps to a valid "
+        f"upstream branch ({reason})."
+    )
     shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
 
@@ -287,13 +314,11 @@ def remove_inbox_dir(path: Path, reason: str) -> None:
 
 
 def remove_inbox_root(path: Path, reason: str) -> None:
-    """
-    Remove an entire inbox repo root that does not map to a real repo.
-    """
+    """Remove an entire inbox repo root that does not map to a real repo."""
     if not path.is_dir():
         return
 
-    log(f"Inbox root {path.name!r} has no real repo; resetting and dropping ERROR.md.")
+    log(f"Removing inbox root {path.name!r}: {reason}.")
     shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
 
@@ -310,128 +335,126 @@ def remove_inbox_root(path: Path, reason: str) -> None:
     log(f"Wrote error marker: {error_path}")
 
 
-def has_real_repo(repo_key: str) -> bool:
+def build_remote_url(repo_key: str, cfg: Dict[str, Any]) -> str:
+    watcher_cfg = cfg.get("watcher", {})
+    owner = watcher_cfg.get("git_default_owner", "owner")
+    host = watcher_cfg.get("git_default_host", "github.com")
+    proto = watcher_cfg.get("git_protocol", "https")
+    return f"{proto}://{host}/{owner}/{repo_key}.git"
+
+
+def check_upstream_repo(repo_key: str, cfg: Dict[str, Any]) -> Tuple[bool, bool, List[str]]:
     """
-    Return True if /srv/repos/<repo_key> exists and looks like a git repo.
+    Return (check_success, repo_exists, branches).
+
+    - check_success False -> leave inbox untouched
+    - repo_exists False   -> delete inbox root
+    - branches list is derived from upstream heads (filtered elsewhere)
     """
-    repo_path = REPOS_ROOT / repo_key
-    return repo_path.is_dir() and is_git_repo(repo_path)
+
+    url = build_remote_url(repo_key, cfg)
+    log(f"Checking upstream for {repo_key} via {url}")
+    success, heads, stderr = run_git_ls_remote(url, heads_only=True)
+
+    if not success:
+        if repo_missing_from_stderr(stderr):
+            log(f"Upstream reports repo {repo_key!r} is missing.")
+            return True, False, []
+        log(f"Upstream check failed for {repo_key!r}; leaving inbox untouched.")
+        return False, False, []
+
+    if heads:
+        log(f"Upstream branches for {repo_key}: {heads}")
+        return True, True, heads
+
+    # No heads found; check for any refs to distinguish between "no branches"
+    # and "repo missing" diagnostics that still surfaced with exit code 0.
+    all_success, refs, stderr_all = run_git_ls_remote(url, heads_only=False)
+    if repo_missing_from_stderr(stderr_all):
+        log(f"Upstream reports repo {repo_key!r} is missing.")
+        return True, False, []
+
+    if not all_success:
+        log(f"Upstream ref probe failed for {repo_key!r}; leaving inbox untouched.")
+        return False, False, []
+
+    log(f"Upstream repo {repo_key!r} exists but has no branches.")
+    return True, True, []
 
 
-def build_from_local_repos(cfg: Dict[str, Any]) -> None:
-    """
-    Walk /srv/repos, inspect real git repos, and create inbox dirs
-    for filtered remote branches.
-    """
-    tb_cfg = cfg.get("tree_builder", {})
-    branch_mode = str(tb_cfg.get("branch_mode", "all")).lower()
-    branch_whitelist = list(tb_cfg.get("branch_whitelist", []))
-    branch_blacklist = list(tb_cfg.get("branch_blacklist", []))
-    branch_name_blacklist = list(tb_cfg.get("branch_name_blacklist", ["HEAD"]))
+def sync_inbox_branches(repo_key: str, wanted: Iterable[str], reason: str) -> None:
+    repo_root = INBOX_ROOT / repo_key
+    repo_root.mkdir(parents=True, exist_ok=True)
 
-    log(f"branch_mode        = {branch_mode!r}")
-    log(f"branch_whitelist   = {branch_whitelist}")
-    log(f"branch_blacklist   = {branch_blacklist}")
-    log(f"branch_name_blacklist = {branch_name_blacklist}")
+    wanted_set: Set[str] = set(wanted)
+    for br in sorted(wanted_set):
+        ensure_inbox_dir(repo_key, br)
 
-    for repo_path in discover_repos(REPOS_ROOT):
-        repo_key = repo_path.name
-        log(f"Processing repo {repo_key}")
-
-        branches = list_remote_branches(repo_path)
-        if not branches:
-            log(f"  No remote branches found for {repo_key}, skipping.")
-            continue
-
-        wanted = filter_branches_for_inbox(
-            branches,
-            branch_mode=branch_mode,
-            whitelist=branch_whitelist,
-            blacklist=branch_blacklist,
-            name_blacklist=branch_name_blacklist,
-        )
-        log(f"  Wanted branches after filtering: {wanted}")
-
-        for br in wanted:
-            ensure_inbox_dir(repo_key, br)
+    existing = {
+        child.name
+        for child in repo_root.iterdir()
+        if child.is_dir()
+    }
+    for stale in sorted(existing - wanted_set):
+        remove_inbox_dir(repo_root / stale, reason=reason)
 
 
-def clean_inbox_branches(cfg: Dict[str, Any]) -> None:
-    """
-    For each inbox repo root that maps to a real repo, ensure that only
-    real branches exist as children. Anything else gets nuked and tagged
-    with ERROR.md.
-    """
-    tb_cfg = cfg.get("tree_builder", {})
-    branch_mode = str(tb_cfg.get("branch_mode", "all")).lower()
-    branch_whitelist = list(tb_cfg.get("branch_whitelist", []))
-    branch_blacklist = list(tb_cfg.get("branch_blacklist", []))
-    branch_name_blacklist = list(tb_cfg.get("branch_name_blacklist", ["HEAD"]))
+def reconcile_local_repo(repo_path: Path, tb_cfg: Dict[str, Any]) -> None:
+    repo_key = repo_path.name
+    log(f"Processing local repo {repo_key}")
 
-    for inbox_repo_root in sorted(INBOX_ROOT.iterdir()) if INBOX_ROOT.is_dir() else []:
-        if not inbox_repo_root.is_dir():
-            continue
-        repo_key = inbox_repo_root.name
+    branches = list_remote_branches(repo_path)
+    if not branches:
+        log(f"  No remote branches found for {repo_key}.")
 
-        if not has_real_repo(repo_key):
-            # This will be handled by clean_inbox_roots()
-            continue
+    wanted = filter_branches_for_inbox(
+        branches,
+        branch_mode=str(tb_cfg.get("branch_mode", "all")).lower(),
+        whitelist=list(tb_cfg.get("branch_whitelist", [])),
+        blacklist=list(tb_cfg.get("branch_blacklist", [])),
+        name_blacklist=list(tb_cfg.get("branch_name_blacklist", ["HEAD"])),
+    )
+    log(f"  Wanted branches after filtering: {wanted}")
 
-        # Get the "correct" branch set from git.
-        repo_path = REPOS_ROOT / repo_key
-        branches = list_remote_branches(repo_path)
-        wanted = set(
-            filter_branches_for_inbox(
-                branches,
-                branch_mode=branch_mode,
-                whitelist=branch_whitelist,
-                blacklist=branch_blacklist,
-                name_blacklist=branch_name_blacklist,
-            )
-        )
-
-        # Walk existing inbox branches and drop anything not in 'wanted'.
-        for child in sorted(inbox_repo_root.iterdir()):
-            if not child.is_dir():
-                continue
-            br = child.name
-            if br not in wanted:
-                remove_inbox_dir(
-                    child,
-                    reason=(
-                        f"branch name {br!r} does not exist in git for repo {repo_key!r} "
-                        f"or was filtered out by tree_builder settings"
-                    ),
-                )
+    sync_inbox_branches(
+        repo_key,
+        wanted,
+        reason=(
+            f"branch name is not present on origin for repo {repo_key!r} or was "
+            f"filtered out by tree_builder settings"
+        ),
+    )
 
 
-def clean_inbox_roots() -> None:
-    """
-    For every top-level inbox root:
-
-        - If there is a matching real repo under /srv/repos/<repo_key>,
-          we leave it alone (branch-level cleanup is done elsewhere).
-
-        - If there is NO matching real repo, we nuke the folder and
-          drop an ERROR.md.
-    """
-    if not INBOX_ROOT.is_dir():
+def reconcile_upstream_repo(repo_key: str, cfg: Dict[str, Any], tb_cfg: Dict[str, Any]) -> None:
+    check_success, repo_exists, branches = check_upstream_repo(repo_key, cfg)
+    if not check_success:
         return
 
-    for child in sorted(INBOX_ROOT.iterdir()):
-        if not child.is_dir():
-            continue
-        repo_key = child.name
-
-        if has_real_repo(repo_key):
-            continue
-
+    if not repo_exists:
         remove_inbox_root(
-            child,
-            reason=(
-                f"repo key {repo_key!r} does not exist as a git repo under {REPOS_ROOT}"
-            ),
+            INBOX_ROOT / repo_key,
+            reason=f"repo key {repo_key!r} does not exist upstream",
         )
+        return
+
+    wanted = filter_branches_for_inbox(
+        branches,
+        branch_mode=str(tb_cfg.get("branch_mode", "all")).lower(),
+        whitelist=list(tb_cfg.get("branch_whitelist", [])),
+        blacklist=list(tb_cfg.get("branch_blacklist", [])),
+        name_blacklist=list(tb_cfg.get("branch_name_blacklist", ["HEAD"])),
+    )
+    log(f"Upstream wanted branches for {repo_key}: {wanted}")
+
+    sync_inbox_branches(
+        repo_key,
+        wanted,
+        reason=(
+            f"branch name is not present upstream for repo {repo_key!r} or was "
+            f"filtered out by tree_builder settings"
+        ),
+    )
 
 
 def main() -> None:
@@ -439,34 +462,30 @@ def main() -> None:
     tb_cfg = cfg.get("tree_builder", {})
     eager_repos = bool(tb_cfg.get("eager_repos", False))
 
+    global INBOX_ROOT, REPOS_ROOT
+    INBOX_ROOT = Path(cfg.get("inbox", INBOX_ROOT))
+    REPOS_ROOT = Path(cfg.get("repos_root", REPOS_ROOT))
+
     log(f"Loaded tree_builder config: {tb_cfg}")
     log(f"Ensuring inbox root exists at {INBOX_ROOT}")
     INBOX_ROOT.mkdir(parents=True, exist_ok=True)
 
-    log("Building from local repos in /srv/repos")
-    log(f"branch_mode        = {tb_cfg.get('branch_mode', 'all')!r}")
-    log(f"branch_whitelist   = {tb_cfg.get('branch_whitelist', [])}")
-    log(f"branch_blacklist   = {tb_cfg.get('branch_blacklist', [])}")
-    log(f"branch_name_blacklist = {tb_cfg.get('branch_name_blacklist', ['HEAD'])}")
-
-    build_from_local_repos(cfg)
+    local_repos = {repo.name: repo for repo in discover_repos(REPOS_ROOT)}
+    repo_keys: Set[str] = set(local_repos)
+    if INBOX_ROOT.is_dir():
+        repo_keys.update(child.name for child in INBOX_ROOT.iterdir() if child.is_dir())
 
     if eager_repos:
-        # In "eager" mode we also ensure an empty repo root exists
-        # for every discovered repo, even if the user hasn't touched
-        # it via Copyparty/Prompt Valet yet. This just creates
-        # /srv/prompt-valet/inbox/<repo_key>/ with no branches.
-        for repo_path in discover_repos(REPOS_ROOT):
-            repo_key = repo_path.name
+        for repo_key in sorted(local_repos):
             repo_root = INBOX_ROOT / repo_key
             repo_root.mkdir(parents=True, exist_ok=True)
             log(f"Eager mode: ensured inbox repo root {repo_root}")
 
-    log("Cleaning inbox branches that do not map to real git branches")
-    clean_inbox_branches(cfg)
-
-    log("Cleaning inbox roots that do not map to real repos")
-    clean_inbox_roots()
+    for repo_key in sorted(repo_keys):
+        if repo_key in local_repos:
+            reconcile_local_repo(local_repos[repo_key], tb_cfg)
+        else:
+            reconcile_upstream_repo(repo_key, cfg, tb_cfg)
 
     log("Inbox tree rebuild complete.")
 

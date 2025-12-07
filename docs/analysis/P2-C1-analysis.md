@@ -43,7 +43,7 @@
 
 ### Config generation rules (Phase 1 schema)
 - The installer must produce `/srv/prompt-valet/config/prompt-valet.yaml` with the following structure:
-  - `tree_builder` subsections for `eager_repos`, `branch_mode`, `branch_whitelist`, `branch_blacklist`, `branch_name_blacklist`, `placeholder_branches`, `greedy_inboxes`, and `scan_interval_seconds`.
+- `tree_builder` subsections for `eager_repos`, `branch_mode`, `branch_whitelist`, `branch_blacklist`, `branch_name_blacklist`, and `scan_interval_seconds`.
   - `inbox`, `processed`, `finished`, `repos_root` pointing at the canonical `/srv/prompt-valet` subdirectories (legacy scripts still expect `/srv/repos` so the installer must ensure either symlinks or consistent values for dynamic behavior).
   - `watcher` block for `auto_clone_missing_repos`, `git_default_owner`, `git_default_host`, `git_protocol`, `cleanup_non_git_dirs`, `runner_cmd`, `runner_model`, `runner_sandbox`.
 - Defaults should mirror `configs/prompt-valet.yaml`; the installer may expose overrides via command-line flags or interactive prompts but must serialize the final YAML with the documented keys.
