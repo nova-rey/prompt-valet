@@ -34,11 +34,10 @@ The installer contract for Phase 2 describes how the system must be laid down so
 - The installer must emit `/srv/prompt-valet/config/prompt-valet.yaml` with these top-level keys (referencing `configs/prompt-valet.yaml` in this repo for defaults):
   - `inbox`, `processed`, `finished`, `repos_root`: absolute paths pointing to the directories listed above.
   - `tree_builder`: governs branch discovery.
-    - `greedy_inboxes` (`bool`, default `false`): when `true`, pre-create inbox folders for every repo discovered.
     - `branch_mode` (`string`, one of `all|whitelist|blacklist|both`): controls which branches are advertised.
     - `branch_whitelist` / `branch_blacklist` (`list[str]`): used in conjunction with `branch_mode`.
     - `branch_name_blacklist` (`list[str]`): branch names never treated as real refs (e.g., `HEAD`).
-    - `placeholder_branches` (`list[str]`, informational) and `scan_interval_seconds` (`int`, default `60`).
+    - `scan_interval_seconds` (`int`, default `60`).
     - `eager_repos` (`bool`, default `false`): when `true`, create inbox roots for each repo even without existing prompts.
   - `watcher`: controls repo auto-cloning and Codex invocation.
     - `auto_clone_missing_repos` (`bool`, default `true`).
