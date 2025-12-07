@@ -68,5 +68,26 @@ def test_example_config_yaml_parses_and_has_expected_sections():
 
     assert isinstance(data, dict), "prompt-valet.yaml should parse to a mapping"
 
-    for section in ("file_server", "watcher", "tree_builder", "runner"):
+    if "file_server" in data:
+        file_server = data["file_server"]
+        assert isinstance(file_server, dict), "prompt-valet.yaml file_server must be a mapping"
+        assert "inbox_dir" in file_server, "prompt-valet.yaml file_server missing [inbox_dir]"
+        assert "processed_dir" in file_server, "prompt-valet.yaml file_server missing [processed_dir]"
+    else:
+        for key in ("inbox", "processed"):
+            assert key in data, f"prompt-valet.yaml missing [{key}] in flat schema"
+
+    for section in ("watcher", "tree_builder"):
         assert section in data, f"prompt-valet.yaml missing [{section}] section"
+
+    watcher_cfg = data["watcher"]
+    assert isinstance(watcher_cfg, dict), "prompt-valet.yaml watcher section must be a mapping"
+
+    if "runner" in data:
+        runner_cfg = data["runner"]
+        assert isinstance(runner_cfg, dict), "prompt-valet.yaml runner section must be a mapping"
+    else:
+        for key in ("runner_cmd", "runner_model"):
+            assert (
+                key in watcher_cfg
+            ), f"prompt-valet.yaml missing [{key}] entry in watcher section"

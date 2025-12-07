@@ -19,6 +19,16 @@ def _create_repo_with_origin(tmp_path: Path) -> Path:
 
     (worktree / "README.md").write_text("initial\n")
     subprocess.run(["git", "add", "README.md"], cwd=worktree, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "ci@example.invalid"],
+        cwd=worktree,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Prompt Valet CI"],
+        cwd=worktree,
+        check=True,
+    )
     subprocess.run(["git", "commit", "-m", "init"], cwd=worktree, check=True)
     subprocess.run(["git", "branch", "-M", "main"], cwd=worktree, check=True)
     subprocess.run(["git", "push", "-u", "origin", "main"], cwd=worktree, check=True)
