@@ -72,6 +72,10 @@ import subprocess
 from pathlib import Path
 from typing import Iterable, Dict, Any, List, Set, Tuple
 
+import json
+import urllib.request
+from urllib.error import HTTPError, URLError
+
 import yaml
 
 # Filesystem layout
@@ -100,6 +104,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "repos_root": str(REPOS_ROOT),
     "tree_builder": {
         "eager_repos": False,
+        "greedy_inboxes": False,
         "branch_mode": "all",  # "all" | "whitelist" | "blacklist"
         "branch_whitelist": [],
         "branch_blacklist": [],
@@ -111,6 +116,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "git_default_owner": "owner",
         "git_default_host": "github.com",
         "git_protocol": "https",
+        "git_api_token_env": None,
         "cleanup_non_git_dirs": True,
         "runner_cmd": "codex",
         "runner_model": "gpt-5.1-codex-mini",
@@ -211,6 +217,90 @@ def discover_repos(root: Path) -> Iterable[Path]:
         for grandchild in sorted(child.iterdir()):
             if grandchild.is_dir() and is_git_repo(grandchild):
                 yield grandchild
+
+
+def _extract_next_link(link_header: str | None) -> str | None:
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        sections = part.split(";")
+        if len(sections) < 2:
+            continue
+        url_part = sections[0].strip()
+        rel_part = sections[1].strip()
+        if 'rel="next"' not in rel_part:
+            continue
+        if url_part.startswith("<") and url_part.endswith(">"):
+            return url_part[1:-1]
+    return None
+
+
+def _build_github_api_base(host: str | None, protocol: str | None) -> str:
+    host = host or "github.com"
+    protocol = protocol or "https"
+    if host.lower().endswith("github.com"):
+        return "https://api.github.com"
+    return f"{protocol}://{host.rstrip('/')}/api/v3"
+
+
+def discover_upstream_repos_for_owner(
+    owner: str,
+    host: str | None,
+    protocol: str | None,
+    token_env: str | None = None,
+) -> list[str]:
+    if not owner:
+        return []
+    api_base = _build_github_api_base(host, protocol)
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "prompt-valet/greedy-inboxes",
+    }
+    if token_env:
+        token_value = os.getenv(token_env)
+        if token_value:
+            headers["Authorization"] = f"token {token_value}"
+    repos: list[str] = []
+    page_url = f"{api_base}/users/{owner}/repos?per_page=100"
+    while page_url:
+        try:
+            request = urllib.request.Request(page_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.load(response)
+                if isinstance(payload, list):
+                    for repo in payload:
+                        if isinstance(repo, dict):
+                            name = repo.get("name")
+                            if isinstance(name, str):
+                                repos.append(name)
+                else:
+                    log(
+                        f"greedy_inboxes=True: unexpected payload shape "
+                        f"while discovering repos for owner '{owner}'"
+                    )
+                page_url = _extract_next_link(response.getheader("Link"))
+        except HTTPError as exc:
+            log(
+                f"greedy_inboxes=True: GitHub API {page_url} responded with "
+                f"{exc.code}: {exc.reason}"
+            )
+            break
+        except URLError as exc:
+            log(f"greedy_inboxes=True: GitHub API request failed for {page_url}: {exc}")
+            break
+        except json.JSONDecodeError as exc:
+            log(
+                f"greedy_inboxes=True: Failed to parse GitHub response for '{owner}': "
+                f"{exc}"
+            )
+            break
+        except Exception as exc:  # pragma: no cover - guard against unexpected issues
+            log(
+                f"greedy_inboxes=True: Unexpected error discovering repos for "
+                f"'{owner}': {exc}"
+            )
+            break
+    return repos
 
 
 def run_git_ls_remote(
@@ -492,7 +582,9 @@ def reconcile_upstream_repo(
 def main() -> None:
     cfg, upstream_enabled = load_config()
     tb_cfg = cfg.get("tree_builder", {})
+    watcher_cfg = cfg.get("watcher", {})
     eager_repos = bool(tb_cfg.get("eager_repos", False))
+    greedy_inboxes = bool(tb_cfg.get("greedy_inboxes", False))
 
     global INBOX_ROOT, REPOS_ROOT
     INBOX_ROOT = Path(cfg.get("inbox", INBOX_ROOT))
@@ -506,6 +598,36 @@ def main() -> None:
     repo_keys: Set[str] = set(local_repos)
     if INBOX_ROOT.is_dir():
         repo_keys.update(child.name for child in INBOX_ROOT.iterdir() if child.is_dir())
+    existing_repo_keys = set(repo_keys)
+
+    upstream_only_repos: Set[str] = set()
+    if greedy_inboxes and upstream_enabled:
+        owner = watcher_cfg.get("git_default_owner") or ""
+        host = watcher_cfg.get("git_default_host", "github.com")
+        protocol = watcher_cfg.get("git_protocol", "https")
+        token_env = watcher_cfg.get("git_api_token_env")
+
+        if owner:
+            log(f"greedy_inboxes=True: discovering repos for owner '{owner}' at {host}")
+            discovered = discover_upstream_repos_for_owner(
+                owner, host, protocol, token_env
+            )
+            upstream_repos = set(discovered)
+            log(
+                f"greedy_inboxes=True: discovered upstream repos: "
+                f"{sorted(upstream_repos)}"
+            )
+            repo_keys |= upstream_repos
+            upstream_only_repos = repo_keys - existing_repo_keys
+            log(
+                f"greedy_inboxes=True: repo set expanded from "
+                f"{len(existing_repo_keys)} to {len(repo_keys)} (including upstream-only repos)"
+            )
+        else:
+            log(
+                "greedy_inboxes=True but git_default_owner is not configured; "
+                "skipping upstream discovery."
+            )
 
     if eager_repos:
         for repo_key in sorted(local_repos):
@@ -523,6 +645,16 @@ def main() -> None:
         if repo_key in local_repos:
             reconcile_local_repo(local_repos[repo_key], tb_cfg)
         else:
+            if repo_key in upstream_only_repos:
+                log(
+                    f"Processing upstream-only repo {repo_key} (no local clone, "
+                    "added via greedy_inboxes)."
+                )
+            else:
+                log(
+                    f"Processing inbox-only repo {repo_key} (no local clone "
+                    "prior to greedy_inboxes)."
+                )
             if upstream_enabled:
                 reconcile_upstream_repo(repo_key, cfg, tb_cfg)
             else:
