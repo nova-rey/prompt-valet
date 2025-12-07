@@ -65,6 +65,7 @@ Config (YAML):
 from __future__ import annotations
 
 import copy
+import os
 import re
 import shutil
 import subprocess
@@ -77,6 +78,7 @@ import yaml
 INBOX_ROOT = Path("/srv/prompt-valet/inbox")
 REPOS_ROOT = Path("/srv/repos")
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
+CONFIG_ENV_VAR = "PV_CONFIG_PATH"
 
 REPO_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -117,19 +119,30 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
-def load_config() -> Dict[str, Any]:
+def resolve_config_path() -> Path:
+    env_path = os.environ.get(CONFIG_ENV_VAR)
+    if not env_path:
+        return DEFAULT_CONFIG_PATH
+    return Path(env_path)
+
+
+def load_config() -> tuple[Dict[str, Any], bool]:
     """
     Load configuration from DEFAULT_CONFIG_PATH, merging into DEFAULT_CONFIG.
 
     Missing file or parse failure fall back to DEFAULT_CONFIG.
     """
     cfg: Dict[str, Any] = copy.deepcopy(DEFAULT_CONFIG)
-    path = DEFAULT_CONFIG_PATH
+    path = resolve_config_path()
     loaded_path = "<defaults>"
+    config_loaded = False
 
     if not path.is_file():
-        log(f"No config file at {path}, using defaults.")
+        log(
+            f"No config file at {path}; upstream discovery disabled; running in local-only mode."
+        )
     else:
+        loaded_path = str(path)
         try:
             user_cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             if not isinstance(user_cfg, dict):
@@ -142,8 +155,12 @@ def load_config() -> Dict[str, Any]:
                     cfg[section] = values
 
             loaded_path = str(path)
+            config_loaded = True
         except Exception as exc:
-            log(f"Failed to read config file {path}: {exc}; using defaults.")
+            log(
+                f"Failed to read config file {path}: {exc}; "
+                "upstream discovery disabled; running in local-only mode."
+            )
 
     watcher_cfg = cfg.get("watcher", {})
     log(
@@ -154,10 +171,11 @@ def load_config() -> Dict[str, Any]:
         f"git_owner={watcher_cfg.get('git_default_owner')} "
         f"git_host={watcher_cfg.get('git_default_host')} "
         f"git_protocol={watcher_cfg.get('git_protocol')} "
+        f"upstream_enabled={config_loaded} "
         "runner=<none>"
     )
 
-    return cfg
+    return cfg, config_loaded
 
 
 # --- Git / inbox helpers ----------------------------------------------------
@@ -446,9 +464,8 @@ def reconcile_upstream_repo(
         return
 
     if not repo_exists:
-        mark_inbox_root_invalid(
-            INBOX_ROOT / repo_key,
-            reason=f"repo key {repo_key!r} does not exist upstream",
+        log(
+            f"Upstream reports repo {repo_key!r} missing; keeping inbox root untouched."
         )
         return
 
@@ -473,7 +490,7 @@ def reconcile_upstream_repo(
 
 
 def main() -> None:
-    cfg = load_config()
+    cfg, upstream_enabled = load_config()
     tb_cfg = cfg.get("tree_builder", {})
     eager_repos = bool(tb_cfg.get("eager_repos", False))
 
@@ -506,7 +523,13 @@ def main() -> None:
         if repo_key in local_repos:
             reconcile_local_repo(local_repos[repo_key], tb_cfg)
         else:
-            reconcile_upstream_repo(repo_key, cfg, tb_cfg)
+            if upstream_enabled:
+                reconcile_upstream_repo(repo_key, cfg, tb_cfg)
+            else:
+                log(
+                    f"Inbox root '{repo_key}' has no local clone and upstream is disabled; "
+                    "leaving it untouched."
+                )
 
     log("Inbox tree rebuild complete.")
 
