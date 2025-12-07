@@ -11,16 +11,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts import rebuild_inbox_tree
+from scripts import rebuild_inbox_tree  # noqa: E402
 
 
 def _run_git(args: list[str], cwd: Path | None = None) -> None:
     subprocess.run(args, cwd=str(cwd) if cwd else None, check=True)
 
 
-def _write_config(
-    path: Path, inbox: Path, repos_root: Path, remote_root: Path
-) -> Path:
+def _write_config(path: Path, inbox: Path, repos_root: Path, remote_root: Path) -> Path:
     config_text = textwrap.dedent(
         f"""
         inbox: "{inbox}"
@@ -80,9 +78,13 @@ def test_upstream_repo_with_zero_heads(
     rebuild_inbox_tree.main()
 
     repo_root = inbox / "branchless"
-    assert repo_root.exists(), "Inbox root should be retained for branchless upstream repo"
+    assert (
+        repo_root.exists()
+    ), "Inbox root should be retained for branchless upstream repo"
     branch_dirs = [p for p in repo_root.iterdir() if p.is_dir()]
-    assert not branch_dirs, "No branch directories should be created when upstream has zero heads"
+    assert (
+        not branch_dirs
+    ), "No branch directories should be created when upstream has zero heads"
 
 
 def test_upstream_repo_missing(
@@ -100,8 +102,13 @@ def test_upstream_repo_missing(
 
     rebuild_inbox_tree.main()
 
+    assert (
+        missing_repo_root.exists()
+    ), "Missing upstream repo should keep its inbox root"
     error_marker = missing_repo_root / "ERROR.md"
-    assert error_marker.exists(), "Missing upstream repo should be replaced with ERROR.md"
+    assert (
+        error_marker.exists()
+    ), "Missing upstream repo should be marked invalid instead of removed"
     assert "does not exist upstream" in error_marker.read_text(encoding="utf-8")
 
 
@@ -144,3 +151,57 @@ def test_upstream_heads_create_branch_dirs(
     assert repo_root.is_dir()
     branches = {p.name for p in repo_root.iterdir() if p.is_dir()}
     assert branches == expected
+
+
+def test_invalid_repo_key_marked_without_deletion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, remote_root: Path
+) -> None:
+    inbox = tmp_path / "inbox"
+    repos_root = tmp_path / "repos"
+    invalid_root = inbox / "bad repo"
+    invalid_root.mkdir(parents=True, exist_ok=True)
+
+    config_path = _write_config(
+        tmp_path / "prompt-valet.yaml", inbox, repos_root, remote_root
+    )
+    _configure_paths(monkeypatch, config_path, inbox, repos_root)
+
+    rebuild_inbox_tree.main()
+
+    assert (
+        invalid_root.exists()
+    ), "Spam repo with illegal characters should not be deleted"
+    error_marker = invalid_root / "ERROR.md"
+    assert error_marker.exists(), "Illegal repo key should produce an error marker"
+    assert "illegal characters" in error_marker.read_text(encoding="utf-8")
+
+
+def test_missing_local_clone_still_processes_repo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, remote_root: Path
+) -> None:
+    inbox = tmp_path / "inbox"
+    repos_root = tmp_path / "repos"
+    repo_key = "nova-process"
+    (inbox / repo_key).mkdir(parents=True, exist_ok=True)
+
+    config_path = _write_config(
+        tmp_path / "prompt-valet.yaml", inbox, repos_root, remote_root
+    )
+    _configure_paths(monkeypatch, config_path, inbox, repos_root)
+
+    def fake_ls_remote(
+        target: str, heads_only: bool = True, cwd: Path | None = None
+    ) -> tuple[bool, list[str], str]:
+        return True, ["main"], ""
+
+    monkeypatch.setattr(rebuild_inbox_tree, "run_git_ls_remote", fake_ls_remote)
+
+    rebuild_inbox_tree.main()
+
+    repo_root = inbox / repo_key
+    assert (
+        repo_root / "main"
+    ).is_dir(), "Tree builder should still create branch folders for a valid repo key"
+    assert not (
+        repo_root / "ERROR.md"
+    ).exists(), "Valid repo key should not leave an error marker"

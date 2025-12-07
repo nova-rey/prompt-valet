@@ -65,6 +65,7 @@ Config (YAML):
 from __future__ import annotations
 
 import copy
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -76,6 +77,12 @@ import yaml
 INBOX_ROOT = Path("/srv/prompt-valet/inbox")
 REPOS_ROOT = Path("/srv/repos")
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
+
+REPO_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_valid_repo_key(repo_key: str) -> bool:
+    return bool(REPO_KEY_PATTERN.fullmatch(repo_key))
 
 
 def log(msg: str) -> None:
@@ -313,26 +320,32 @@ def remove_inbox_dir(path: Path, reason: str) -> None:
     log(f"Wrote error marker: {error_path}")
 
 
-def remove_inbox_root(path: Path, reason: str) -> None:
-    """Remove an entire inbox repo root that does not map to a real repo."""
-    if not path.is_dir():
-        return
-
-    log(f"Removing inbox root {path.name!r}: {reason}.")
-    shutil.rmtree(path)
+def _write_repo_error(path: Path, reason: str) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-
     error_path = path / "ERROR.md"
     error_text = (
         "# Invalid repo key\n\n"
-        f"This folder did not correspond to any real git repo under {REPOS_ROOT}.\n\n"
+        "This folder failed the tree builder's repo-key validation rules.\n\n"
         f"Reason: {reason}\n\n"
-        "The Prompt Valet tree builder automatically removed it.\n"
-        "If you believe this is an error, check your repo names and the "
-        "tree_builder configuration.\n"
+        "The Prompt Valet tree builder wrote this marker without deleting "
+        "the folder. If you believe this is an error, review the repo key "
+        "and the `tree_builder` configuration.\n"
     )
     error_path.write_text(error_text, encoding="utf-8")
     log(f"Wrote error marker: {error_path}")
+    return error_path
+
+
+def mark_inbox_root_invalid(path: Path, reason: str) -> None:
+    log(f"Marking inbox root {path.name!r} invalid: {reason}")
+    _write_repo_error(path, reason)
+
+
+def mark_inbox_root_valid(path: Path) -> None:
+    error_path = path / "ERROR.md"
+    if error_path.is_file():
+        error_path.unlink()
+        log(f"Removed invalid marker: {error_path}")
 
 
 def build_remote_url(repo_key: str, cfg: Dict[str, Any]) -> str:
@@ -343,7 +356,9 @@ def build_remote_url(repo_key: str, cfg: Dict[str, Any]) -> str:
     return f"{proto}://{host}/{owner}/{repo_key}.git"
 
 
-def check_upstream_repo(repo_key: str, cfg: Dict[str, Any]) -> Tuple[bool, bool, List[str]]:
+def check_upstream_repo(
+    repo_key: str, cfg: Dict[str, Any]
+) -> Tuple[bool, bool, List[str]]:
     """
     Return (check_success, repo_exists, branches).
 
@@ -390,11 +405,7 @@ def sync_inbox_branches(repo_key: str, wanted: Iterable[str], reason: str) -> No
     for br in sorted(wanted_set):
         ensure_inbox_dir(repo_key, br)
 
-    existing = {
-        child.name
-        for child in repo_root.iterdir()
-        if child.is_dir()
-    }
+    existing = {child.name for child in repo_root.iterdir() if child.is_dir()}
     for stale in sorted(existing - wanted_set):
         remove_inbox_dir(repo_root / stale, reason=reason)
 
@@ -424,15 +435,18 @@ def reconcile_local_repo(repo_path: Path, tb_cfg: Dict[str, Any]) -> None:
             f"filtered out by tree_builder settings"
         ),
     )
+    mark_inbox_root_valid(INBOX_ROOT / repo_key)
 
 
-def reconcile_upstream_repo(repo_key: str, cfg: Dict[str, Any], tb_cfg: Dict[str, Any]) -> None:
+def reconcile_upstream_repo(
+    repo_key: str, cfg: Dict[str, Any], tb_cfg: Dict[str, Any]
+) -> None:
     check_success, repo_exists, branches = check_upstream_repo(repo_key, cfg)
     if not check_success:
         return
 
     if not repo_exists:
-        remove_inbox_root(
+        mark_inbox_root_invalid(
             INBOX_ROOT / repo_key,
             reason=f"repo key {repo_key!r} does not exist upstream",
         )
@@ -455,6 +469,7 @@ def reconcile_upstream_repo(repo_key: str, cfg: Dict[str, Any], tb_cfg: Dict[str
             f"filtered out by tree_builder settings"
         ),
     )
+    mark_inbox_root_valid(INBOX_ROOT / repo_key)
 
 
 def main() -> None:
@@ -482,6 +497,12 @@ def main() -> None:
             log(f"Eager mode: ensured inbox repo root {repo_root}")
 
     for repo_key in sorted(repo_keys):
+        repo_root = INBOX_ROOT / repo_key
+        if not is_valid_repo_key(repo_key):
+            mark_inbox_root_invalid(
+                repo_root, reason="Repo key contains illegal characters."
+            )
+            continue
         if repo_key in local_repos:
             reconcile_local_repo(local_repos[repo_key], tb_cfg)
         else:
