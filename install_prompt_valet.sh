@@ -58,7 +58,7 @@ install_packages() {
     DEBIAN_FRONTEND=noninteractive apt-get update
   fi
 
-  local packages=(git python3 python3-venv python3-pip systemd curl)
+  local packages=(git python3 python3-venv python3-pip python3-yaml systemd curl)
   if ((DRY_RUN)); then
     log "dry-run: apt-get install -y ${packages[*]}"
   else
@@ -122,6 +122,7 @@ write_prompt_valet_config() {
     return
   fi
 
+  log "Writing prompt-valet config to $CONFIG_PATH"
   python3 <<'PY' > "$CONFIG_PATH"
 import os
 import sys
@@ -174,6 +175,7 @@ write_copyparty_config() {
       return
     fi
 
+    log "Writing Copyparty config to $COPYPARTY_CONFIG_PATH"
     cat > "$COPYPARTY_CONFIG_PATH" <<EOF
 service:
   name: "Prompt Valet Inbox"
@@ -190,6 +192,7 @@ EOF
     return
   fi
 
+  log "Removing Copyparty config $COPYPARTY_CONFIG_PATH"
   rm -f "$COPYPARTY_CONFIG_PATH"
 }
 
@@ -201,6 +204,7 @@ write_service_units() {
   if ((DRY_RUN)); then
     log "dry-run: write $watcher_unit"
   else
+    log "Writing watcher unit to $watcher_unit"
     cat <<EOF > "$watcher_unit"
 [Unit]
 Description=Prompt Valet — Watcher
@@ -219,6 +223,7 @@ EOF
   if ((DRY_RUN)); then
     log "dry-run: write $tree_unit"
   else
+    log "Writing tree builder unit to $tree_unit"
     cat <<EOF > "$tree_unit"
 [Unit]
 Description=Prompt Valet — Inbox Tree Builder
@@ -235,6 +240,7 @@ EOF
   if ((DRY_RUN)); then
     log "dry-run: write $timer_unit"
   else
+    log "Writing tree builder timer unit to $timer_unit"
     cat <<EOF > "$timer_unit"
 [Unit]
 Description=Prompt Valet — Tree Builder Timer
@@ -253,6 +259,7 @@ EOF
     if ((DRY_RUN)); then
       log "dry-run: write $copyparty_unit"
     else
+      log "Writing Copyparty service unit to $copyparty_unit"
       cat <<EOF > "$copyparty_unit"
 [Unit]
 Description=Copyparty — Prompt Valet Inbox
@@ -272,6 +279,7 @@ EOF
     if ((DRY_RUN)); then
       log "dry-run: remove $copyparty_unit"
     else
+      log "Removing Copyparty service unit $copyparty_unit"
       rm -f "$copyparty_unit"
     fi
   fi
@@ -281,6 +289,7 @@ reload_and_enable_units() {
   if ((DRY_RUN)); then
     log "dry-run: systemctl daemon-reload"
   else
+    log "Running systemctl daemon-reload"
     systemctl daemon-reload
   fi
 
@@ -290,9 +299,13 @@ reload_and_enable_units() {
     log "dry-run: systemctl enable --now prompt-valet-tree-builder.timer"
     log "dry-run: systemctl start prompt-valet-tree-builder.service"
   else
+    log "Enabling watcher service"
     systemctl enable --now prompt-valet-watcher.service
+    log "Enabling tree builder service"
     systemctl enable prompt-valet-tree-builder.service
+    log "Enabling tree builder timer"
     systemctl enable --now prompt-valet-tree-builder.timer
+    log "Starting tree builder service"
     systemctl start prompt-valet-tree-builder.service
   fi
 
@@ -300,6 +313,7 @@ reload_and_enable_units() {
     if ((DRY_RUN)); then
       log "dry-run: systemctl enable --now copyparty.service"
     else
+      log "Enabling Copyparty service"
       systemctl enable --now copyparty.service
     fi
   else
@@ -308,6 +322,7 @@ reload_and_enable_units() {
       log "dry-run: systemctl disable copyparty.service"
       log "dry-run: systemctl mask copyparty.service"
     else
+      log "Disabling Copyparty service"
       systemctl stop --now copyparty.service >/dev/null 2>&1 || true
       systemctl disable copyparty.service >/dev/null 2>&1 || true
       systemctl mask copyparty.service >/dev/null 2>&1 || true

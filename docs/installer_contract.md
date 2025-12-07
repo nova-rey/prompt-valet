@@ -83,6 +83,11 @@ After dropping or removing units, the installer must run `systemctl daemon-reloa
 - Respect `PV_VALIDATE_ONLY=1` by printing each planned action instead of mutating files, installing packages, or touching `systemctl`.
 - If cloning fails, the script should exit non-zero so that the operator is aware the environment is not safe for the watcher.
 
+## Manual validation workflow
+1. **Dry run via `PV_VALIDATE_ONLY=1`.** Export `PV_VALIDATE_ONLY=1` and execute `./install_prompt_valet.sh`. The installer should only print the planned operations (mkdirs, apt commands, git operations, file writes, and `systemctl` invocations) prefixed with `dry-run:` or `DRY RUN:` while leaving `/srv/prompt-valet`, `/srv/repos`, and `/etc/systemd/system` untouched.
+2. **Full Debian VM install.** On a Debian 12 (or compatible) VM, run `./install_prompt_valet.sh` as root. Afterwards, confirm the `/srv/prompt-valet/{inbox,processed,finished,config,scripts,logs}` layout and `/srv/repos` exist, `codex_watcher.py` and `rebuild_inbox_tree.py` live under `/srv/prompt-valet/scripts`, and `/srv/prompt-valet/config/prompt-valet.yaml` matches the schema in this contract (respecting any overridden environment variables).
+3. **Systemd verification & service state.** Before enabling the units, run `systemd-analyze verify systemd/*.service systemd/*.timer` (or perform an equivalent structural check) to catch syntax issues. After installation, examine `systemctl is-enabled`/`status` for `prompt-valet-watcher.service`, `prompt-valet-tree-builder.service`, and `prompt-valet-tree-builder.timer` so they are enabled and active. When `PV_FILE_SERVER_MODE=copyparty`, the Copyparty service should be enabled and running; otherwise, it should be disabled and masked. Document any deviations from these expectations before declaring Block C complete.
+
 ## Verification checklist
 1. Run `bash -n install_prompt_valet.sh` to ensure the script is syntactically valid.
 2. Use `systemd-analyze verify` (or equivalent) on each `.service`/`.timer` file before installation to ensure the unit syntax is correct.
