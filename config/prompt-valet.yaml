@@ -1,36 +1,40 @@
-# prompt-valet.yaml
-# Canonical configuration for Prompt Valet components.
+# Prompt Valet runtime configuration
 
+# Where the inbox and processed trees live on disk.
 inbox: "/srv/prompt-valet/inbox"
 processed: "/srv/prompt-valet/processed"
 repos_root: "/srv/prompt-valet/repos"
 
-# Tree builder configuration (shared defaults for rebuild_inbox_tree.py).
-tree_builder:
-  # When true, pre-create inbox roots for every repo under /srv/prompt-valet/repos.
-  eager_inboxes: false
-  greedy_inboxes: false
+# Default Git owner/host for upstream discovery.
+git_owner: "nova-rey"
+git_host: "github.com"
+git_protocol: "https"
 
-  # Branch selection strategy: "all", "whitelist", "blacklist", or "both".
+tree_builder:
+  # Enable greedy mode: also consider upstream-only repos when building inbox roots.
+  greedy_inboxes: true
+
+  # Whether to aggressively pre-clone repos (usually false; watcher does cloning).
+  eager_repos: false
+
+  # Branch selection strategy: "all", "whitelist", "blacklist".
   branch_mode: "all"
   branch_whitelist: []
   branch_blacklist: []
 
-  # Names that should never be treated as real branches (e.g., "HEAD").
+  # Names that should never be treated as real branches.
   branch_name_blacklist:
     - "HEAD"
 
-
   scan_interval_seconds: 60
 
-# Watcher-specific options used by both scripts.
 watcher:
   auto_clone_missing_repos: true
   git_default_owner: "owner"
   git_default_host: "github.com"
   git_protocol: "https"
-  git_api_token_env: null
   cleanup_non_git_dirs: true
+
   runner_cmd: "codex"
   runner_model: "gpt-5.1-codex-mini"
   runner_sandbox: "danger-full-access"
