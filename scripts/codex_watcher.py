@@ -40,15 +40,15 @@ from scripts import queue_runtime
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
-DEFAULT_PV_ROOT = DEFAULT_CONFIG_PATH.parent.parent
+DEFAULT_PV_ROOT = Path("/srv/prompt-valet")
 DEBOUNCE_SECONDS = 2
 POLL_INTERVAL_SECONDS = 1.0
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "inbox": "/srv/prompt-valet/inbox",
-    "processed": "/srv/prompt-valet/processed",
-    "finished": "/srv/prompt-valet/finished",
-    "repos_root": "/srv/prompt-valet/repos",
+    "inbox": str(DEFAULT_PV_ROOT / "inbox"),
+    "processed": str(DEFAULT_PV_ROOT / "processed"),
+    "finished": str(DEFAULT_PV_ROOT / "finished"),
+    "repos_root": str(DEFAULT_PV_ROOT / "repos"),
     "pv_root": str(DEFAULT_PV_ROOT),
     "failed": str(DEFAULT_PV_ROOT / "failed"),
     "queue": {
@@ -782,17 +782,18 @@ def _queue_root_from_config(cfg: Dict[str, Any]) -> Path:
     return pv_root / ".queue" / "jobs"
 
 
-def load_config() -> Dict[str, Any]:
+def load_config() -> tuple[Dict[str, Any], Path]:
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     path = DEFAULT_CONFIG_PATH
 
     loaded_path: str = "<defaults>"
+    user_cfg: Dict[str, Any] = {}
+
     if path.is_file():
         try:
-            user_cfg = yaml.safe_load(path.read_text()) or {}
+            user_cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             if not isinstance(user_cfg, dict):
-                raise ValueError("YAML config is not a mapping at top level")
-            # shallow merge; nested dicts we expect to be dicts
+                raise ValueError("YAML config is not a mapping at the top level")
             for key, value in user_cfg.items():
                 if (
                     isinstance(value, dict)
@@ -807,32 +808,47 @@ def load_config() -> Dict[str, Any]:
                 f"Failed to load YAML config at {path}: {exc}; "
                 "falling back to defaults"
             )
+            user_cfg = {}
             loaded_path = "<defaults>"
 
     cfg = normalize_config(cfg)
 
-    inbox_root = Path(cfg["inbox"]).expanduser().resolve()
-    processed_root = Path(cfg["processed"]).expanduser().resolve()
-    finished_root = Path(cfg.get("finished", DEFAULT_CONFIG["finished"])).expanduser().resolve()
-    repos_root = Path(cfg["repos_root"]).expanduser().resolve()
-    pv_root = Path(cfg.get("pv_root", DEFAULT_CONFIG["pv_root"])).expanduser().resolve()
-    failed_root = Path(cfg.get("failed", DEFAULT_CONFIG["failed"])).expanduser().resolve()
     watcher_cfg = cfg.get("watcher", {})
     queue_cfg = cfg.get("queue", {})
 
+    pv_root = Path(cfg.get("pv_root", str(DEFAULT_PV_ROOT))).expanduser().resolve()
+
+    dir_defaults = {
+        "inbox": "inbox",
+        "processed": "processed",
+        "finished": "finished",
+        "repos_root": "repos",
+        "failed": "failed",
+    }
+
+    explicit_dirs = {key for key in dir_defaults if key in user_cfg}
+
+    resolved_dirs: Dict[str, Path] = {}
+    for key, subdir in dir_defaults.items():
+        raw_value = cfg.get(key) if key in explicit_dirs else str(pv_root / subdir)
+        resolved_path = Path(raw_value).expanduser().resolve()
+        resolved_dirs[key] = resolved_path
+        cfg[key] = str(resolved_path)
+
+    inbox_root = resolved_dirs["inbox"]
+    processed_root = resolved_dirs["processed"]
+    finished_root = resolved_dirs["finished"]
+    repos_root = resolved_dirs["repos_root"]
+    failed_root = resolved_dirs["failed"]
+
+    pv_root.mkdir(parents=True, exist_ok=True)
     inbox_root.mkdir(parents=True, exist_ok=True)
     processed_root.mkdir(parents=True, exist_ok=True)
     finished_root.mkdir(parents=True, exist_ok=True)
     repos_root.mkdir(parents=True, exist_ok=True)
-    pv_root.mkdir(parents=True, exist_ok=True)
     failed_root.mkdir(parents=True, exist_ok=True)
 
-    cfg["inbox"] = str(inbox_root)
-    cfg["processed"] = str(processed_root)
-    cfg["finished"] = str(finished_root)
-    cfg["repos_root"] = str(repos_root)
     cfg["pv_root"] = str(pv_root)
-    cfg["failed"] = str(failed_root)
     cfg["queue"] = queue_cfg
 
     runner_cmd = watcher_cfg.get("runner_cmd", "codex")
@@ -849,7 +865,10 @@ def load_config() -> Dict[str, Any]:
         f"queue.enabled={queue_cfg.get('enabled')}"
     )
 
-    return cfg
+    config_label = str(path) if path.is_file() else "<defaults>"
+    log(f"Using pv_root={pv_root} config={config_label}")
+
+    return cfg, pv_root
 
 
 def load_config_from_dict(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1436,7 +1455,7 @@ def main(argv: Optional[list] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    CONFIG = load_config()
+    CONFIG, pv_root = load_config()
     INBOX_MODE = CONFIG.get("inbox_mode", "legacy_single_owner")
     JOB_STATES.clear()
 
