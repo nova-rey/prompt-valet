@@ -15,6 +15,7 @@ This version:
 """
 
 import argparse
+import copy
 import datetime as dt
 import logging
 import os
@@ -22,7 +23,6 @@ import queue
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -32,12 +32,15 @@ from typing import Any, Dict, Literal, Optional, Sequence, Tuple
 
 import yaml  # type: ignore
 
+from scripts import queue_runtime
+
 
 # ---------------------------------------------------------------------------
 # Config & constants
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
+DEFAULT_PV_ROOT = DEFAULT_CONFIG_PATH.parent.parent
 DEBOUNCE_SECONDS = 2
 POLL_INTERVAL_SECONDS = 1.0
 
@@ -46,6 +49,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "processed": "/srv/prompt-valet/processed",
     "finished": "/srv/prompt-valet/finished",
     "repos_root": "/srv/prompt-valet/repos",
+    "pv_root": str(DEFAULT_PV_ROOT),
+    "failed": str(DEFAULT_PV_ROOT / "failed"),
+    "queue": {
+        "enabled": False,
+        "max_retries": 3,
+        "failure_archive": False,
+    },
     "watcher": {
         "auto_clone_missing_repos": True,
         "git_default_owner": "nova-rey",
@@ -79,6 +89,29 @@ def now_utc_iso() -> str:
 def log(msg: str) -> None:
     ts = now_utc_iso()
     print(f"[codex_watcher] [{ts}] {msg}", flush=True)
+
+
+def _emit_job_event(
+    event: str,
+    *,
+    job_record: queue_runtime.JobRecord,
+    reason: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    repo = f"{job_record.git_owner}/{job_record.repo_name}"
+    parts = [
+        f"event={event}",
+        f"job_id={job_record.job_id}",
+        f"state={job_record.state}",
+        f"repo={repo}",
+        f"branch={job_record.branch_name}",
+    ]
+    if reason:
+        parts.append(f"reason={reason}")
+    if extra:
+        for key, value in extra.items():
+            parts.append(f"{key}={value}")
+    log("[prompt-valet] " + " ".join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +581,12 @@ def finalize_inbox_prompt(
 
 
 def start_jobs_from_running(
-    inbox_root: Path, processed_root: Path, job_queue: "queue.Queue[Job]"
+    inbox_root: Path,
+    processed_root: Path,
+    job_queue: Optional["queue.Queue[Job]"],
+    *,
+    queue_enabled: bool = False,
+    queue_root: Optional[Path] = None,
 ) -> None:
     """
     Phase B of the watcher loop: start jobs based on *.running.md files.
@@ -582,6 +620,20 @@ def start_jobs_from_running(
             )
             continue
 
+        if queue_enabled:
+            if queue_root is None:
+                raise RuntimeError("Queue root is required when queue is enabled")
+            _enqueue_queue_job(
+                running_path=running_path,
+                prompt_rel=prompt_rel,
+                git_owner=git_owner,
+                repo_name=repo_name,
+                branch_name=branch_name,
+                queue_root=queue_root,
+            )
+            continue
+
+        assert job_queue is not None
         run_id = dt.datetime.utcnow().strftime("%Y%m%d-%H%M-%S")
         run_root = (
             processed_root
@@ -619,6 +671,43 @@ def start_jobs_from_running(
             f"prompt={prompt_rel} run_root={run_root}"
         )
         job_queue.put(job)
+
+
+def _enqueue_queue_job(
+    running_path: Path,
+    prompt_rel: Path,
+    git_owner: str,
+    repo_name: str,
+    branch_name: str,
+    queue_root: Path,
+) -> None:
+    key = _job_key(prompt_rel)
+    inbox_file = str(running_path)
+    existing = queue_runtime.find_job_for_inbox(queue_root, inbox_file)
+    if existing:
+        return
+
+    job_record = queue_runtime.enqueue_job(
+        queue_root,
+        git_owner=git_owner,
+        repo_name=repo_name,
+        branch_name=branch_name,
+        inbox_file=inbox_file,
+        inbox_rel=str(prompt_rel),
+        reason="new_prompt",
+    )
+
+    JOB_STATES[key] = STATUS_RUNNING
+    log(
+        "[prompt-valet] enqueued job "
+        f"prompt={prompt_rel} queue={job_record.job_id}"
+    )
+    _emit_job_event(
+        "job.created",
+        job_record=job_record,
+        reason="new_prompt",
+        extra={"queue_path": str(job_record.job_dir)},
+    )
 
 
 def claim_new_prompts(inbox_root: Path) -> None:
@@ -675,11 +764,26 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if "inbox_mode" not in cfg and "inbox_mode" in watcher_cfg:
         cfg["inbox_mode"] = watcher_cfg["inbox_mode"]
 
+    queue_cfg = cfg.setdefault("queue", {})
+    queue_cfg.setdefault("enabled", False)
+    queue_cfg.setdefault("max_retries", 3)
+    queue_cfg.setdefault("failure_archive", False)
+    queue_cfg.setdefault("jobs_root", None)
+
     return cfg
 
 
+def _queue_root_from_config(cfg: Dict[str, Any]) -> Path:
+    queue_cfg = cfg.get("queue", {})
+    override = queue_cfg.get("jobs_root")
+    if override:
+        return Path(override).expanduser().resolve()
+    pv_root = Path(cfg["pv_root"]).expanduser().resolve()
+    return pv_root / ".queue" / "jobs"
+
+
 def load_config() -> Dict[str, Any]:
-    cfg = DEFAULT_CONFIG.copy()
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
     path = DEFAULT_CONFIG_PATH
 
     loaded_path: str = "<defaults>"
@@ -711,17 +815,25 @@ def load_config() -> Dict[str, Any]:
     processed_root = Path(cfg["processed"]).expanduser().resolve()
     finished_root = Path(cfg.get("finished", DEFAULT_CONFIG["finished"])).expanduser().resolve()
     repos_root = Path(cfg["repos_root"]).expanduser().resolve()
+    pv_root = Path(cfg.get("pv_root", DEFAULT_CONFIG["pv_root"])).expanduser().resolve()
+    failed_root = Path(cfg.get("failed", DEFAULT_CONFIG["failed"])).expanduser().resolve()
     watcher_cfg = cfg.get("watcher", {})
+    queue_cfg = cfg.get("queue", {})
 
     inbox_root.mkdir(parents=True, exist_ok=True)
     processed_root.mkdir(parents=True, exist_ok=True)
     finished_root.mkdir(parents=True, exist_ok=True)
     repos_root.mkdir(parents=True, exist_ok=True)
+    pv_root.mkdir(parents=True, exist_ok=True)
+    failed_root.mkdir(parents=True, exist_ok=True)
 
     cfg["inbox"] = str(inbox_root)
     cfg["processed"] = str(processed_root)
     cfg["finished"] = str(finished_root)
     cfg["repos_root"] = str(repos_root)
+    cfg["pv_root"] = str(pv_root)
+    cfg["failed"] = str(failed_root)
+    cfg["queue"] = queue_cfg
 
     runner_cmd = watcher_cfg.get("runner_cmd", "codex")
     log(
@@ -729,10 +841,12 @@ def load_config() -> Dict[str, Any]:
         f"{loaded_path} "
         f"inbox={inbox_root} "
         f"processed={processed_root} "
+        f"pv_root={pv_root} "
         f"git_owner={cfg.get('git_owner')} "
         f"git_host={cfg.get('git_host')} "
         f"git_protocol={watcher_cfg.get('git_protocol', 'https')} "
-        f"runner={runner_cmd} exec"
+        f"runner={runner_cmd} exec "
+        f"queue.enabled={queue_cfg.get('enabled')}"
     )
 
     return cfg
@@ -740,7 +854,7 @@ def load_config() -> Dict[str, Any]:
 
 def load_config_from_dict(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize an existing config dict (primarily for tests)."""
-    normalized = DEFAULT_CONFIG.copy()
+    normalized = copy.deepcopy(DEFAULT_CONFIG)
     for key, value in cfg.items():
         if isinstance(value, dict) and isinstance(normalized.get(key), dict):
             normalized[key].update(value)  # type: ignore[arg-type]
@@ -930,7 +1044,7 @@ def create_pr_for_job(job: Job, repo_dir: Path, logger: logging.Logger) -> None:
     logger.info("PR: successfully created PR for branch %s", branch_name)
 
 
-def process_job(job: Job) -> bool:
+def run_prompt_job(job: Job) -> bool:
     """
     Run a single job end-to-end:
     - make sure repo is cloned
@@ -1018,7 +1132,7 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
 
         try:
             log(f"Processing job {job!r}")
-            success = process_job(job)
+            success = run_prompt_job(job)
         except Exception as exc:
             log(f"Error processing {job.inbox_path}: {exc!r}")
             JOB_STATES[_job_key(job.inbox_rel)] = STATUS_ERROR
@@ -1046,6 +1160,266 @@ def worker(job_queue: "queue.Queue[Job]", stop_event: threading.Event) -> None:
             job_queue.task_done()
 
 
+def _prepare_run_copy(
+    job_record: queue_runtime.JobRecord, processed_root: Path
+) -> tuple[Path, Path]:
+    run_root = (
+        processed_root
+        / job_record.git_owner
+        / job_record.repo_name
+        / job_record.branch_name
+        / job_record.job_id
+    )
+    run_root.mkdir(parents=True, exist_ok=True)
+    prompt_copy = run_root / "prompt.md"
+    shutil.copy2(job_record.inbox_file, prompt_copy)
+    return run_root, prompt_copy
+
+
+def _build_job_from_queue_record(
+    job_record: queue_runtime.JobRecord, run_root: Path, prompt_copy: Path
+) -> Job:
+    return Job(
+        git_owner=job_record.git_owner,
+        repo_name=job_record.repo_name,
+        branch_name=job_record.branch_name,
+        job_id=job_record.job_id,
+        inbox_rel=Path(job_record.inbox_rel),
+        inbox_path=Path(job_record.inbox_file),
+        run_root=run_root,
+        prompt_path=prompt_copy,
+    )
+
+
+def _archive_prompt_file(job: Job, target_root: Path) -> Optional[Path]:
+    dest_dir = (
+        target_root
+        / job.git_owner
+        / job.repo_name
+        / job.branch_name
+        / job.job_id
+    )
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / job.inbox_rel.name
+    try:
+        Path(job.inbox_path).replace(dest_path)
+    except FileNotFoundError:
+        log(
+            f"[prompt-valet] Warning: unable to archive prompt {job.inbox_rel}; "
+            "file missing."
+        )
+        return None
+    return dest_path
+
+
+def _handle_queue_failure(
+    queue_job: queue_runtime.JobRecord,
+    *,
+    job: Optional[Job],
+    failure_reason: str,
+    retryable: bool,
+    failure_archive: bool,
+    failed_root: Path,
+    max_retries: int,
+) -> queue_runtime.JobRecord:
+    can_retry = retryable and queue_runtime.should_retry(queue_job, max_retries)
+    if can_retry:
+        queue_job = queue_runtime.mark_failed(
+            queue_job, retryable=True, reason=failure_reason
+        )
+        _emit_job_event(
+            "job.failed.retryable",
+            job_record=queue_job,
+            extra={
+                "failure_reason": failure_reason,
+                "retries": queue_job.retries,
+            },
+        )
+        queue_job = queue_runtime.requeue(queue_job)
+        _emit_job_event(
+            "job.requeued",
+            job_record=queue_job,
+            extra={"retries": queue_job.retries},
+        )
+        return queue_job
+
+    archived_path = None
+    if failure_archive and job:
+        archived_path = _archive_prompt_file(job, failed_root)
+
+    queue_job = queue_runtime.mark_failed(
+        queue_job,
+        retryable=False,
+        reason=failure_reason,
+        archived_path=str(archived_path) if archived_path else None,
+    )
+    if archived_path:
+        _emit_job_event(
+            "job.archived",
+            job_record=queue_job,
+            extra={"archived_path": str(archived_path)},
+        )
+    _emit_job_event(
+        "job.failed.final",
+        job_record=queue_job,
+        extra={"failure_reason": failure_reason},
+    )
+    job_rel = job.inbox_rel if job else Path(queue_job.inbox_rel)
+    JOB_STATES[_job_key(job_rel)] = STATUS_ERROR
+    return queue_job
+
+
+def _process_queue_job(
+    job_record: queue_runtime.JobRecord,
+    *,
+    processed_root: Path,
+    failed_root: Path,
+    failure_archive: bool,
+    max_retries: int,
+) -> None:
+    queue_job = queue_runtime.mark_running(job_record, reason="executor")
+    started_at = dt.datetime.utcnow()
+    _emit_job_event(
+        "job.running",
+        job_record=queue_job,
+        extra={
+            "started_at": started_at.isoformat(),
+            "executor": "codex_watcher",
+        },
+    )
+
+    try:
+        run_root, prompt_copy = _prepare_run_copy(queue_job, processed_root)
+        job = _build_job_from_queue_record(queue_job, run_root, prompt_copy)
+    except FileNotFoundError as exc:
+        failure_reason = f"missing prompt file: {exc}"
+        _handle_queue_failure(
+            queue_job,
+            job=None,
+            failure_reason=failure_reason,
+            retryable=False,
+            failure_archive=False,
+            failed_root=failed_root,
+            max_retries=max_retries,
+        )
+        return
+
+    try:
+        success = run_prompt_job(job)
+    except Exception as exc:
+        failure_reason = str(exc)
+        _handle_queue_failure(
+            queue_job,
+            job=job,
+            failure_reason=failure_reason,
+            retryable=False,
+            failure_archive=failure_archive,
+            failed_root=failed_root,
+            max_retries=max_retries,
+        )
+        return
+
+    if not success:
+        failure_reason = "preflight"
+        _handle_queue_failure(
+            queue_job,
+            job=job,
+            failure_reason=failure_reason,
+            retryable=True,
+            failure_archive=failure_archive,
+            failed_root=failed_root,
+            max_retries=max_retries,
+        )
+        return
+
+    archived_path = _archive_prompt_file(job, processed_root)
+    if archived_path is None:
+        failure_reason = "missing running prompt during success archive"
+        _handle_queue_failure(
+            queue_job,
+            job=job,
+            failure_reason=failure_reason,
+            retryable=False,
+            failure_archive=False,
+            failed_root=failed_root,
+            max_retries=max_retries,
+        )
+        return
+
+    queue_job = queue_runtime.mark_succeeded(
+        queue_job, processed_path=str(archived_path)
+    )
+    duration = (dt.datetime.utcnow() - started_at).total_seconds()
+    _emit_job_event(
+        "job.succeeded",
+        job_record=queue_job,
+        extra={
+            "duration": duration,
+            "processed_path": str(archived_path),
+        },
+    )
+    _emit_job_event(
+        "job.archived",
+        job_record=queue_job,
+        extra={"archived_path": str(archived_path)},
+    )
+    JOB_STATES[_job_key(job.inbox_rel)] = STATUS_DONE
+
+
+def _queue_executor_loop(
+    queue_root: Path,
+    processed_root: Path,
+    failed_root: Path,
+    *,
+    failure_archive: bool,
+    max_retries: int,
+    stop_event: threading.Event,
+) -> None:
+    while not stop_event.is_set():
+        job_record = queue_runtime.get_next_queued_job(queue_root)
+        if job_record is None:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+        try:
+            _process_queue_job(
+                job_record,
+                processed_root=processed_root,
+                failed_root=failed_root,
+                failure_archive=failure_archive,
+                max_retries=max_retries,
+            )
+        except Exception as exc:
+            log(f"Queue executor error: {exc!r}")
+
+
+def _drain_queue_once(
+    queue_root: Path,
+    processed_root: Path,
+    failed_root: Path,
+    *,
+    failure_archive: bool,
+    max_retries: int,
+) -> None:
+    idle_cycles = 0
+    while idle_cycles < 3:
+        job_record = queue_runtime.get_next_queued_job(queue_root)
+        if job_record is None:
+            idle_cycles += 1
+            time.sleep(0.1)
+            continue
+        idle_cycles = 0
+        try:
+            _process_queue_job(
+                job_record,
+                processed_root=processed_root,
+                failed_root=failed_root,
+                failure_archive=failure_archive,
+                max_retries=max_retries,
+            )
+        except Exception as exc:
+            log(f"Queue executor (once) error: {exc!r}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1066,25 +1440,61 @@ def main(argv: Optional[list] = None) -> int:
     INBOX_MODE = CONFIG.get("inbox_mode", "legacy_single_owner")
     JOB_STATES.clear()
 
+    queue_cfg = CONFIG.get("queue", {})
+    queue_enabled = bool(queue_cfg.get("enabled"))
+    max_retries = int(queue_cfg.get("max_retries", 3))
+    failure_archive = bool(queue_cfg.get("failure_archive", False))
+    queue_root = _queue_root_from_config(CONFIG) if queue_enabled else None
+
     inbox_root = Path(CONFIG["inbox"])
     processed_root = Path(CONFIG["processed"])
     finished_root = Path(CONFIG["finished"])
+    failed_root = Path(CONFIG["failed"])
+    repos_root = Path(CONFIG["repos_root"])
 
     inbox_root.mkdir(parents=True, exist_ok=True)
     processed_root.mkdir(parents=True, exist_ok=True)
     finished_root.mkdir(parents=True, exist_ok=True)
-    Path(CONFIG["repos_root"]).expanduser().resolve().mkdir(parents=True, exist_ok=True)
+    failed_root.mkdir(parents=True, exist_ok=True)
+    repos_root.mkdir(parents=True, exist_ok=True)
+
+    if queue_enabled and queue_root is None:
+        raise RuntimeError("queue.enabled is true but queue root is undefined")
+    if queue_enabled:
+        queue_runtime.ensure_jobs_root(queue_root)
 
     if args.once:
-        job_queue: "queue.Queue[Job]" = queue.Queue()
         claim_new_prompts(inbox_root)
-        start_jobs_from_running(inbox_root, processed_root, job_queue)
+        if queue_enabled:
+            start_jobs_from_running(
+                inbox_root,
+                processed_root,
+                None,
+                queue_enabled=True,
+                queue_root=queue_root,
+            )
+            _drain_queue_once(
+                queue_root,
+                processed_root,
+                failed_root,
+                failure_archive=failure_archive,
+                max_retries=max_retries,
+            )
+            return 0
 
-        # Process synchronously
+        job_queue: "queue.Queue[Job]" = queue.Queue()
+        start_jobs_from_running(
+            inbox_root,
+            processed_root,
+            job_queue,
+            queue_enabled=False,
+            queue_root=None,
+        )
+
         while not job_queue.empty():
             job = job_queue.get()
             try:
-                process_job(job)
+                success = run_prompt_job(job)
             except Exception as exc:  # pragma: no cover
                 log(f"Error processing {job.inbox_path}: {exc!r}")
                 JOB_STATES[_job_key(job.inbox_rel)] = STATUS_ERROR
@@ -1096,6 +1506,13 @@ def main(argv: Optional[list] = None) -> int:
                     delay_seconds=0.0,
                 )
             else:
+                if not success:
+                    log(
+                        "Git preflight: unrecoverable git error; leaving prompt %s in inbox for retry.",
+                        job.inbox_rel,
+                    )
+                    job_queue.task_done()
+                    continue
                 JOB_STATES[_job_key(job.inbox_rel)] = STATUS_DONE
                 finalize_inbox_prompt(
                     inbox_root=inbox_root,
@@ -1108,12 +1525,25 @@ def main(argv: Optional[list] = None) -> int:
                 job_queue.task_done()
         return 0
 
-    # Normal watcher mode
-    job_queue: "queue.Queue[Job]" = queue.Queue()
     stop_event = threading.Event()
+    job_queue: Optional["queue.Queue[Job]"] = None
     log(f"Starting Codex watcher on {inbox_root}")
 
-    t = threading.Thread(target=worker, args=(job_queue, stop_event), daemon=True)
+    if queue_enabled:
+        t = threading.Thread(
+            target=_queue_executor_loop,
+            args=(queue_root, processed_root, failed_root),
+            kwargs={
+                "failure_archive": failure_archive,
+                "max_retries": max_retries,
+                "stop_event": stop_event,
+            },
+            daemon=True,
+        )
+    else:
+        job_queue = queue.Queue()
+        t = threading.Thread(target=worker, args=(job_queue, stop_event), daemon=True)
+
     t.start()
 
     def _handle_sigterm(signum, frame):  # pragma: no cover
@@ -1126,7 +1556,13 @@ def main(argv: Optional[list] = None) -> int:
     try:
         while not stop_event.is_set():
             claim_new_prompts(inbox_root)
-            start_jobs_from_running(inbox_root, processed_root, job_queue)
+            start_jobs_from_running(
+                inbox_root,
+                processed_root,
+                job_queue,
+                queue_enabled=queue_enabled,
+                queue_root=queue_root,
+            )
             time.sleep(POLL_INTERVAL_SECONDS)
     finally:
         stop_event.set()
