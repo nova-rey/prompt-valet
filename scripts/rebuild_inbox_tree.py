@@ -79,8 +79,10 @@ from urllib.error import HTTPError, URLError
 import yaml
 
 # Filesystem layout
-INBOX_ROOT = Path("/srv/prompt-valet/inbox")
-REPOS_ROOT = Path("/srv/repos")
+DEFAULT_INBOX_ROOT = Path("/srv/prompt-valet/inbox")
+DEFAULT_REPOS_ROOT = Path("/srv/repos")
+INBOX_ROOT = DEFAULT_INBOX_ROOT
+REPOS_ROOT = DEFAULT_REPOS_ROOT
 DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
 CONFIG_ENV_VAR = "PV_CONFIG_PATH"
 
@@ -99,9 +101,9 @@ def log(msg: str) -> None:
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "inbox": str(INBOX_ROOT),
+    "inbox": str(DEFAULT_INBOX_ROOT),
     "processed": "/srv/prompt-valet/processed",
-    "repos_root": str(REPOS_ROOT),
+    "repos_root": str(DEFAULT_REPOS_ROOT),
     "tree_builder": {
         "eager_repos": False,
         "greedy_inboxes": False,
@@ -123,6 +125,24 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "runner_sandbox": "danger-full-access",
     },
 }
+
+
+def resolve_inbox_root(cfg: Dict[str, Any] | None = None) -> Path:
+    """
+    Return the effective inbox root path.
+
+    Priority:
+    1. If INBOX_ROOT has already been overridden (e.g., by tests), keep that.
+    2. If the loaded config specifies an inbox path, use that.
+    3. Otherwise fall back to the default install path.
+    """
+    if INBOX_ROOT != DEFAULT_INBOX_ROOT:
+        return INBOX_ROOT
+    if cfg:
+        inbox_cfg = cfg.get("inbox")
+        if inbox_cfg:
+            return Path(inbox_cfg)
+    return DEFAULT_INBOX_ROOT
 
 
 def resolve_config_path() -> Path:
@@ -169,11 +189,13 @@ def load_config() -> tuple[Dict[str, Any], bool]:
             )
 
     watcher_cfg = cfg.get("watcher", {})
+    effective_inbox = resolve_inbox_root(cfg)
+    processed_path = cfg.get("processed") or "<n/a>"
     log(
         "[prompt-valet] loaded config="
         f"{loaded_path} "
-        f"inbox={INBOX_ROOT} "
-        "processed=<n/a> "
+        f"inbox={effective_inbox} "
+        f"processed={processed_path} "
         f"git_owner={watcher_cfg.get('git_default_owner')} "
         f"git_host={watcher_cfg.get('git_default_host')} "
         f"git_protocol={watcher_cfg.get('git_protocol')} "
@@ -587,7 +609,7 @@ def main() -> None:
     greedy_inboxes = bool(tb_cfg.get("greedy_inboxes", False))
 
     global INBOX_ROOT, REPOS_ROOT
-    INBOX_ROOT = Path(cfg.get("inbox", INBOX_ROOT))
+    INBOX_ROOT = resolve_inbox_root(cfg)
     REPOS_ROOT = Path(cfg.get("repos_root", REPOS_ROOT))
 
     log(f"Loaded tree_builder config: {tb_cfg}")
