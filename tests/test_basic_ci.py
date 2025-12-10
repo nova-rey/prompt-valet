@@ -32,14 +32,14 @@ def _load_source(path: Path) -> str:
 def test_default_config_path_and_logging_contract():
     """
     Enforce invariants:
-    - Both scripts point at /srv/prompt-valet/config/prompt-valet.yaml
+    - Both scripts point at /etc/prompt-valet/prompt-valet.yaml
     - Both scripts contain the standard prompt-valet log prefix.
     """
     watcher_src = _load_source(SCRIPTS_DIR / "codex_watcher.py")
     tree_src = _load_source(SCRIPTS_DIR / "rebuild_inbox_tree.py")
 
     # DEFAULT_CONFIG_PATH should reference the canonical YAML path in both scripts
-    expected_path = "/srv/prompt-valet/config/prompt-valet.yaml"
+    expected_path = "/etc/prompt-valet/prompt-valet.yaml"
 
     assert expected_path in watcher_src, "Watcher script is not using the canonical config path"
     assert expected_path in tree_src, "Tree-builder script is not using the canonical config path"

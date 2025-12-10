@@ -6,7 +6,7 @@ Watches an inbox tree for *.prompt.md files and runs them through the Codex CLI,
 creating branches and PRs for each job.
 
 This version:
-- Uses YAML config at /srv/prompt-valet/config/prompt-valet.yaml (if present),
+- Uses YAML config at /etc/prompt-valet/prompt-valet.yaml (if present),
   merged on top of DEFAULT_CONFIG.
 - Handles existing job branches by reusing + hard-resetting them instead of
   failing the whole job (fixes "branch already exists" errors on reruns).
@@ -37,15 +37,17 @@ import yaml  # type: ignore
 # Config & constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
+DEFAULT_CONFIG_PATH = Path("/etc/prompt-valet/prompt-valet.yaml")
+DEFAULT_PV_ROOT = Path("/srv/prompt-valet")
 DEBOUNCE_SECONDS = 2
 POLL_INTERVAL_SECONDS = 1.0
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "inbox": "/srv/prompt-valet/inbox",
-    "processed": "/srv/prompt-valet/processed",
-    "finished": "/srv/prompt-valet/finished",
-    "repos_root": "/srv/prompt-valet/repos",
+    "pv_root": str(DEFAULT_PV_ROOT),
+    "inbox": str(DEFAULT_PV_ROOT / "inbox"),
+    "processed": str(DEFAULT_PV_ROOT / "processed"),
+    "finished": str(DEFAULT_PV_ROOT / "finished"),
+    "repos_root": str(DEFAULT_PV_ROOT / "repos"),
     "watcher": {
         "auto_clone_missing_repos": True,
         "git_default_owner": "nova-rey",
@@ -678,9 +680,10 @@ def normalize_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
-def load_config() -> Dict[str, Any]:
+def load_config() -> tuple[Dict[str, Any], Path]:
     cfg = DEFAULT_CONFIG.copy()
     path = DEFAULT_CONFIG_PATH
+    provided_keys: set[str] = set()
 
     loaded_path: str = "<defaults>"
     if path.is_file():
@@ -698,6 +701,7 @@ def load_config() -> Dict[str, Any]:
                 else:
                     cfg[key] = value
             loaded_path = str(path)
+            provided_keys.update(user_cfg.keys())
         except Exception as exc:  # pragma: no cover
             log(
                 f"Failed to load YAML config at {path}: {exc}; "
@@ -706,6 +710,21 @@ def load_config() -> Dict[str, Any]:
             loaded_path = "<defaults>"
 
     cfg = normalize_config(cfg)
+
+    pv_root_str = cfg.get("pv_root", str(DEFAULT_PV_ROOT))
+    pv_root = Path(pv_root_str).expanduser().resolve()
+    pv_root.mkdir(parents=True, exist_ok=True)
+    default_dirs = {
+        "inbox": pv_root / "inbox",
+        "processed": pv_root / "processed",
+        "finished": pv_root / "finished",
+        "repos_root": pv_root / "repos",
+    }
+    for key, default_path in default_dirs.items():
+        if key not in provided_keys:
+            cfg[key] = str(default_path)
+    cfg["pv_root"] = str(pv_root)
+    log(f"Using pv_root={pv_root} config={loaded_path}")
 
     inbox_root = Path(cfg["inbox"]).expanduser().resolve()
     processed_root = Path(cfg["processed"]).expanduser().resolve()
@@ -735,7 +754,7 @@ def load_config() -> Dict[str, Any]:
         f"runner={runner_cmd} exec"
     )
 
-    return cfg
+    return cfg, pv_root
 
 
 def load_config_from_dict(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1062,7 +1081,7 @@ def main(argv: Optional[list] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    CONFIG = load_config()
+    CONFIG, pv_root = load_config()
     INBOX_MODE = CONFIG.get("inbox_mode", "legacy_single_owner")
     JOB_STATES.clear()
 

@@ -31,7 +31,7 @@ branch lifecycles.
 
 Config (YAML):
 
-    /srv/prompt-valet/config/prompt-valet.yaml
+    /etc/prompt-valet/prompt-valet.yaml
 
     tree_builder:
       # If true, also create an empty inbox root for every repo
@@ -83,7 +83,7 @@ DEFAULT_INBOX_ROOT = Path("/srv/prompt-valet/inbox")
 DEFAULT_REPOS_ROOT = Path("/srv/repos")
 INBOX_ROOT = DEFAULT_INBOX_ROOT
 REPOS_ROOT = DEFAULT_REPOS_ROOT
-DEFAULT_CONFIG_PATH = Path("/srv/prompt-valet/config/prompt-valet.yaml")
+DEFAULT_CONFIG_PATH = Path("/etc/prompt-valet/prompt-valet.yaml")
 CONFIG_ENV_VAR = "PV_CONFIG_PATH"
 
 REPO_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")

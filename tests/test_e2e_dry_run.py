@@ -44,6 +44,7 @@ def fixture_prompt_valet_root(tmp_path: Path) -> PromptValetRoot:
     config_path.write_text(
         textwrap.dedent(
             f"""
+            pv_root: "{root}"
             inbox: "{inbox}"
             processed: "{processed}"
             finished: "{finished}"
