@@ -46,6 +46,7 @@ def fixture_prompt_valet_root(tmp_path: Path) -> PromptValetRoot:
             f"""
             inbox: "{inbox}"
             processed: "{processed}"
+            pv_root: "{root}"
             finished: "{finished}"
             repos_root: "{repos}"
             git_owner: "test-owner"
