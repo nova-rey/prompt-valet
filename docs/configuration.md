@@ -89,3 +89,33 @@ The default paths are:
 Watcher only treats *.prompt.md as new jobs. Files with .running.md,
 .done.md, or .error.md suffixes are considered status markers and will
 not be re-enqueued.
+
+### `pv_root` & `failed`
+
+- `pv_root` (default `/srv/prompt-valet`)
+  - The canonical Prompt Valet root directory used to derive queue metadata,
+    default artifacts (inbox/processed/finished), and helper trees like `.queue`.
+- `failed` (default `/srv/prompt-valet/failed`)
+  - Used when queue-driven runs exhaust their retries and the prompt is archived
+    for manual inspection. The subpath mirrors `inbox/<repo>/<branch>/<job_id>/...`.
+
+### `queue`
+
+- `enabled` (bool, default: `false`)
+  - When `false`, the watcher behaves exactly as before: it directly copies
+    `.running.md` files into a run directory and runs Codex inline.
+  - When `true`, discovered prompts are enqueued in a filesystem-backed queue and
+    a dedicated executor loop drains `queued` jobs into Codex runs + PR creation.
+- `max_retries` (int, default: `3`)
+  - Governs how many times a failed but retryable job is moved from
+    `failed_retryable` back to `queued`. Once reached, the run is marked
+    `failed_final` instead.
+- `failure_archive` (bool, default: `false`)
+  - When `true` and a job ends in `failed_final`, the `.running.md` file is moved
+    into `failed/<repo>/<branch>/<job_id>/...`; otherwise it remains in the inbox.
+- `jobs_root` (string, optional)
+  - Override the filesystem path used for `<pv_root>/.queue/jobs`, e.g.
+    `/data/custom/.queue/jobs`, while keeping the watcher logic unchanged.
+
+See `docs/work_queue_phase2_design.md` for the phase-level goals behind the queue
+intake/executor contract and the logging schema that now powers `/var/log`.

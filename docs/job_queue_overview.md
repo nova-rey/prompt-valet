@@ -71,3 +71,9 @@ The following helpers are exposed by scripts/pv_jobs.py:
 - JSON writes are done via a write-then-rename pattern to reduce the risk of partial files.
 - Listing jobs ignores malformed JSON entries instead of crashing the process.
 - No existing watcher behavior is changed in this checkpoint; nothing in the main Prompt Valet pipeline depends on the job store yet.
+
+## Implementation status
+
+- `scripts/queue_runtime.py` implements the Q1 job runtime, keeping job directories under `<pv_root>/.queue/jobs/<job_id>/`.
+- The Q2 watcher/executor wiring is now in `scripts/codex_watcher.py` via `queue.enabled`, while `run_prompt_job` still runs Codex for both modes (Q3 scope).
+- The `queue.max_retries`/`queue.failure_archive` settings and the new tests in `tests/test_queue_runtime.py` and `tests/test_queue_watcher.py` validate the lifecycle from `job.created` through `job.failed.final`.

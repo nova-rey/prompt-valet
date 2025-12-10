@@ -1,9 +1,13 @@
 # Prompt Valet runtime configuration
 
+# Where watchers and queue data live on disk.
+pv_root: "/srv/prompt-valet"
+
 # Where the inbox and processed trees live on disk.
 inbox: "/srv/prompt-valet/inbox"
 processed: "/srv/prompt-valet/processed"
 repos_root: "/srv/prompt-valet/repos"
+failed: "/srv/prompt-valet/failed"
 
 # Default Git owner/host for upstream discovery.
 git_owner: "nova-rey"
@@ -38,3 +42,9 @@ watcher:
   runner_cmd: "codex"
   runner_model: "gpt-5.1-codex-mini"
   runner_sandbox: "danger-full-access"
+
+# Queue mode controls whether prompts run through the file-backed queue.
+queue:
+  enabled: false
+  max_retries: 3
+  failure_archive: false
