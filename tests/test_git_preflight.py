@@ -22,6 +22,8 @@ def test_ensure_worker_repo_clean_and_synced_dirty_repo(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / ".git").mkdir()
 
+    base_branch = "feature/api"
+
     responses = [
         {
             "args": ["status", "--porcelain"],
@@ -29,7 +31,7 @@ def test_ensure_worker_repo_clean_and_synced_dirty_repo(tmp_path, monkeypatch):
             "stdout": " M docs/example.md\n",
             "stderr": "",
         },
-        {"args": ["checkout", "main"], "rc": 0, "stdout": "", "stderr": ""},
+        {"args": ["checkout", base_branch], "rc": 0, "stdout": "", "stderr": ""},
         {"args": ["pull", "--ff-only"], "rc": 0, "stdout": "", "stderr": ""},
     ]
     expected_calls = [r["args"] for r in responses]
@@ -51,7 +53,9 @@ def test_ensure_worker_repo_clean_and_synced_dirty_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_watcher, "ensure_repo_cloned", _fake_ensure_repo_cloned)
     logger = logging.getLogger("test")
 
-    ok = codex_watcher.ensure_worker_repo_clean_and_synced(repo, "main", logger)
+    ok = codex_watcher.ensure_worker_repo_clean_and_synced(
+        repo, base_branch, logger
+    )
 
     assert ok is True
     assert calls == expected_calls
@@ -62,9 +66,11 @@ def test_ensure_worker_repo_clean_and_synced_clean_repo(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / ".git").mkdir()
 
+    base_branch = "feature/api"
+
     responses = [
         {"args": ["status", "--porcelain"], "rc": 0, "stdout": "", "stderr": ""},
-        {"args": ["checkout", "main"], "rc": 0, "stdout": "", "stderr": ""},
+        {"args": ["checkout", base_branch], "rc": 0, "stdout": "", "stderr": ""},
         {"args": ["pull", "--ff-only"], "rc": 0, "stdout": "", "stderr": ""},
     ]
     expected_calls = [r["args"] for r in responses]
@@ -86,7 +92,9 @@ def test_ensure_worker_repo_clean_and_synced_clean_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_watcher, "ensure_repo_cloned", _fake_ensure_repo_cloned)
     logger = logging.getLogger("test")
 
-    ok = codex_watcher.ensure_worker_repo_clean_and_synced(repo, "main", logger)
+    ok = codex_watcher.ensure_worker_repo_clean_and_synced(
+        repo, base_branch, logger
+    )
 
     assert ok is True
     assert calls == expected_calls
@@ -96,6 +104,8 @@ def test_ensure_worker_repo_clean_and_synced_status_failure(tmp_path, monkeypatc
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
+
+    base_branch = "feature/api"
 
     responses = [
         {"args": ["status", "--porcelain"], "rc": 1, "stdout": "", "stderr": "nope"},
@@ -116,7 +126,9 @@ def test_ensure_worker_repo_clean_and_synced_status_failure(tmp_path, monkeypatc
     logger = logging.getLogger("test")
 
     with caplog.at_level(logging.ERROR):
-        ok = codex_watcher.ensure_worker_repo_clean_and_synced(repo, "main", logger)
+        ok = codex_watcher.ensure_worker_repo_clean_and_synced(
+            repo, base_branch, logger
+        )
 
     assert ok is False
     assert "git status" in caplog.text

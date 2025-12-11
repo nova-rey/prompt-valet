@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 
 from scripts import pv_jobs
@@ -122,3 +123,33 @@ def test_list_jobs_filters_by_status(tmp_path: Path) -> None:
     assert job1.job_id not in failed_ids
 
     assert pending_ids.union(failed_ids).issubset(all_ids)
+
+
+def test_job_from_inbox_path_extracts_branch(tmp_path: Path) -> None:
+    inbox_root = tmp_path / "inbox"
+    prompt_path = inbox_root / "demo-repo" / "API" / "Test.prompt.md"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text("prompt contents")
+
+    job = pv_jobs.Job.from_inbox_path(
+        prompt_path,
+        inbox_root=inbox_root,
+        prompt_sha256="deadbeef" * 8,
+    )
+
+    assert job.repo_name == "demo-repo"
+    assert job.branch_name == "API"
+
+
+def test_job_from_inbox_path_requires_branch_segment(tmp_path: Path) -> None:
+    inbox_root = tmp_path / "inbox"
+    prompt_path = inbox_root / "demo-repo" / "Test.prompt.md"
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text("prompt contents")
+
+    with pytest.raises(ValueError):
+        pv_jobs.Job.from_inbox_path(
+            prompt_path,
+            inbox_root=inbox_root,
+            prompt_sha256="deadbeef" * 8,
+        )

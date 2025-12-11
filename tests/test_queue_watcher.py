@@ -1,5 +1,7 @@
+import logging
 import os
 import queue
+import subprocess
 import time
 from pathlib import Path
 
@@ -203,3 +205,78 @@ def test_queue_executor_archives_final_failure(tmp_path, monkeypatch):
     failed_path = Path(job_record.archived_path)
     assert failed_path.exists()
     assert not running.exists()
+
+
+def test_prepare_branch_uses_job_branch(tmp_path, monkeypatch):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    job = codex_watcher.Job(
+        git_owner="owner",
+        repo_name="example",
+        branch_name="API",
+        job_id="job-1",
+        inbox_rel=Path("example/API/prompt.prompt.md"),
+        inbox_path=repo_dir / "prompt.running.md",
+        run_root=tmp_path / "run",
+        prompt_path=tmp_path / "prompt.md",
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run_git(args, *, cwd, allow_failure=False):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(codex_watcher, "run_git", fake_run_git)
+
+    base_branch = codex_watcher.get_job_base_branch(job)
+    codex_watcher.prepare_branch(repo_dir, job.branch_name, base_branch=base_branch)
+
+    assert any(base_branch in cmd for cmd in calls)
+    assert all("main" not in arg for cmd in calls for arg in cmd)
+
+
+def test_create_pr_uses_job_branch_as_base(tmp_path, monkeypatch):
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    job = codex_watcher.Job(
+        git_owner="owner",
+        repo_name="example",
+        branch_name="feature-xyz",
+        job_id="job-2",
+        inbox_rel=Path("example/feature-xyz/prompt.prompt.md"),
+        inbox_path=repo_dir / "prompt.running.md",
+        run_root=tmp_path / "run",
+        prompt_path=tmp_path / "prompt.md",
+    )
+
+    run_cmd_calls: list[list[str]] = []
+
+    def fake_run_cmd(cmd, cwd=None):
+        run_cmd_calls.append(cmd)
+        if cmd == ["git", "status", "--porcelain"]:
+            return 0, "M docs/example.md\n", ""
+        return 0, "", ""
+
+    def fake_run_git(args, *, cwd, allow_failure=False):
+        assert args[:2] == ["ls-remote", "--heads"]
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="deadbeef\trefs/heads/feature-xyz\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(codex_watcher, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(codex_watcher, "run_git", fake_run_git)
+
+    logger = logging.getLogger("test")
+    codex_watcher.create_pr_for_job(job, repo_dir, logger)
+
+    gh_cmds = [cmd for cmd in run_cmd_calls if cmd and cmd[0] == "gh"]
+    assert gh_cmds, "gh pr create was not invoked"
+    gh_cmd = gh_cmds[-1]
+    assert "--base" in gh_cmd
+    base_index = gh_cmd.index("--base") + 1
+    assert base_index < len(gh_cmd)
+    assert gh_cmd[base_index] == "feature-xyz"

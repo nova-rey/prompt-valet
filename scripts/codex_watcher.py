@@ -199,8 +199,29 @@ def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.Complete
     return proc
 
 
+def get_remote_branch_names(repo_dir: Path, logger: logging.Logger) -> set[str]:
+    """
+    Return the set of remote branch names known on origin for this repo.
+    """
+    proc = run_git(["ls-remote", "--heads", "origin"], cwd=repo_dir)
+    branches: set[str] = set()
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        _, ref = parts
+        prefix = "refs/heads/"
+        if ref.startswith(prefix):
+            branches.add(ref[len(prefix) :])
+    logger.debug("Remote branches for %s: %s", repo_dir, ", ".join(sorted(branches)))
+    return branches
+
+
 def ensure_worker_repo_clean_and_synced(
-    repo_path: Path, branch: str, logger: logging.Logger
+    repo_path: Path, base_branch: str, logger: logging.Logger
 ) -> bool:
     """Ensure the worker repo is usable before running Codex.
 
@@ -230,8 +251,8 @@ def ensure_worker_repo_clean_and_synced(
             return False
         return True
 
-    def _checkout_main_and_pull() -> bool:
-        for args in (["checkout", "main"], ["pull", "--ff-only"]):
+    def _checkout_base_and_pull() -> bool:
+        for args in (["checkout", base_branch], ["pull", "--ff-only"]):
             proc = _run_git(args, cwd=repo_path, logger=logger)
             if proc.returncode != 0:
                 logger.error(
@@ -266,11 +287,12 @@ def ensure_worker_repo_clean_and_synced(
         # Fresh clone failed.
         return False
 
-    if not _checkout_main_and_pull():
+    if not _checkout_base_and_pull():
         return False
 
     logger.info(
-        "Git preflight: repo clean, on main, and synced; proceeding with Codex run."
+        "Git preflight: repo clean, on %s, and synced; proceeding with Codex run.",
+        base_branch,
     )
     return True
 
@@ -406,7 +428,7 @@ def ensure_agent_branch(repo_dir: Path, job_branch: str) -> None:
 def prepare_branch(
     repo_dir: Path,
     job_branch: str,
-    base_branch: str = "main",
+    base_branch: str,
 ) -> None:
     """
     Make sure the repo is on a clean job branch derived from base_branch.
@@ -419,7 +441,7 @@ def prepare_branch(
     run_git(["remote", "-v"], cwd=repo_dir, allow_failure=True)
 
     # Fetch latest and get onto base branch
-    run_git(["fetch", "origin"], cwd=repo_dir)
+    run_git(["fetch", "origin", base_branch], cwd=repo_dir)
     run_git(["checkout", base_branch], cwd=repo_dir)
     run_git(["reset", "--hard", f"origin/{base_branch}"], cwd=repo_dir)
     run_git(["clean", "-fd"], cwd=repo_dir)
@@ -899,6 +921,22 @@ class Job:
     prompt_path: Path
 
 
+def get_job_base_branch(job: Job) -> str:
+    """
+    Return the upstream base branch this job should target.
+
+    Uses the inbox branch folder from job.branch_name.
+    Does NOT silently fall back to 'main'; callers must handle missing branches.
+    """
+    if not job.branch_name:
+        raise ValueError(f"Job {job.job_id} is missing branch_name")
+    return job.branch_name
+
+
+class MissingBaseBranchError(RuntimeError):
+    """Raised when the desired base branch is absent on the upstream remote."""
+
+
 def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path) -> None:
     """
     Invoke the Codex CLI using the prompt file as the input prompt.
@@ -979,6 +1017,22 @@ def create_pr_for_job(job: Job, repo_dir: Path, logger: logging.Logger) -> None:
         logger.info("PR: no changes detected, skipping PR creation.")
         return
 
+    base_branch = get_job_base_branch(job)
+    remote_branches = get_remote_branch_names(repo_dir, logger)
+    if base_branch not in remote_branches:
+        reason = (
+            f"Base branch '{base_branch}' not found on origin for repo "
+            f"'{job.git_owner}/{job.repo_name}'; refusing to fall back to 'main'."
+        )
+        logger.error(reason)
+        raise MissingBaseBranchError(reason)
+
+    logger.info(
+        "Opening PR for job %s against base branch %s",
+        job.job_id,
+        base_branch,
+    )
+
     prompt_slug = (
         job.inbox_rel.stem.replace(" ", "-").replace("_", "-").replace(".", "-")
     )
@@ -987,9 +1041,15 @@ def create_pr_for_job(job: Job, repo_dir: Path, logger: logging.Logger) -> None:
 
     logger.info("PR: preparing branch %s", branch_name)
 
-    rc, out, err = run_cmd(["git", "checkout", "main"], cwd=repo_dir)
+    rc, out, err = run_cmd(["git", "checkout", base_branch], cwd=repo_dir)
     if rc != 0:
-        logger.error("PR: git checkout main failed (rc=%s): %s\n%s", rc, out, err)
+        logger.error(
+            "PR: git checkout %s failed (rc=%s): %s\n%s",
+            base_branch,
+            rc,
+            out,
+            err,
+        )
         return
 
     rc, out, err = run_cmd(["git", "pull", "--ff-only"], cwd=repo_dir)
@@ -1050,7 +1110,7 @@ def create_pr_for_job(job: Job, repo_dir: Path, logger: logging.Logger) -> None:
             "--body",
             body,
             "--base",
-            "main",
+            base_branch,
             "--head",
             branch_name,
         ],
@@ -1079,7 +1139,8 @@ def run_prompt_job(job: Job) -> bool:
     repo_dir = derive_repo_root_from_prompt(CONFIG, str(original_prompt_path))
     repo_dir = ensure_repo_cloned(repos_root, job.git_owner, job.repo_name)
 
-    if not ensure_worker_repo_clean_and_synced(repo_dir, job.branch_name, logger):
+    base_branch = get_job_base_branch(job)
+    if not ensure_worker_repo_clean_and_synced(repo_dir, base_branch, logger):
         logger.error(
             "Git preflight: unrecoverable git error; skipping Codex run for %s.",
             job.prompt_path,
@@ -1088,7 +1149,7 @@ def run_prompt_job(job: Job) -> bool:
         return False
 
     job_branch = job.branch_name
-    prepare_branch(repo_dir, job_branch, base_branch="main")
+    prepare_branch(repo_dir, job_branch, base_branch=base_branch)
 
     run_root = job.run_root
     run_root.mkdir(parents=True, exist_ok=True)
@@ -1128,6 +1189,11 @@ def run_prompt_job(job: Job) -> bool:
     if codex_success:
         try:
             create_pr_for_job(job, repo_dir, logger)
+        except MissingBaseBranchError:
+            logger.exception(
+                "PR: missing base branch; marking job as failed."
+            )
+            raise
         except Exception:
             logger.exception(
                 "Unhandled exception during PR creation; continuing anyway."

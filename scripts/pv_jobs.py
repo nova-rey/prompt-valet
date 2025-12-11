@@ -57,6 +57,50 @@ class Job:
     # Free-form metadata bag for future extensions (e.g., codex config, tags).
     metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
+    @property
+    def repo_name(self) -> str:
+        return self.repo
+
+    @property
+    def branch_name(self) -> str:
+        return self.branch
+
+    @classmethod
+    def from_inbox_path(
+        cls,
+        prompt_path: Path,
+        *,
+        inbox_root: Path,
+        prompt_sha256: str,
+        job_id: Optional[str] = None,
+        logical_prompt: Optional[str] = None,
+        base_commit: Optional[str] = None,
+        attempt: int = 1,
+        rerun_of: Optional[str] = None,
+        superseded_by: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "Job":
+        """
+        Construct a Job directly from an inbox prompt path.
+        """
+        repo_name, branch_name, rel_path = _parse_inbox_prompt_path(
+            prompt_path, inbox_root
+        )
+        return cls(
+            job_id=job_id or uuid.uuid4().hex,
+            repo=repo_name,
+            branch=branch_name,
+            logical_prompt=logical_prompt or rel_path.name,
+            prompt_path=str(rel_path),
+            prompt_sha256=prompt_sha256,
+            base_commit=base_commit,
+            status=JOB_STATUS_PENDING,
+            attempt=attempt,
+            rerun_of=rerun_of,
+            superseded_by=superseded_by,
+            metadata=dict(metadata or {}),
+        )
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "job_id": self.job_id,
@@ -93,6 +137,30 @@ class Job:
             updated_at=data.get("updated_at", _utc_now_iso()),
             metadata=dict(data.get("metadata", {})),
         )
+
+
+def _parse_inbox_prompt_path(
+    prompt_path: Path, inbox_root: Path
+) -> tuple[str, str, Path]:
+    prompt = Path(prompt_path)
+    root = Path(inbox_root)
+    try:
+        rel = prompt.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Prompt path {prompt} is not under inbox root {root}"
+        ) from exc
+
+    parts = rel.parts
+    if len(parts) < 3:
+        raise ValueError(
+            "Prompt path must include at least repo, branch, and file segments "
+            f"relative to {root}; got {rel}"
+        )
+
+    repo_name = parts[0]
+    branch_name = parts[1]
+    return repo_name, branch_name, rel
 
 
 def ensure_jobs_root(root: Path | str) -> Path:
