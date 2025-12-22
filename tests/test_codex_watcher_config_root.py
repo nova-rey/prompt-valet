@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 from scripts import codex_watcher
 
 
-def test_load_config_respects_pv_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_load_config_respects_pv_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     pv_root = tmp_path / "prompt-valet"
     config_dir = pv_root / "config"
     config_dir.mkdir(parents=True, exist_ok=True)

@@ -3,16 +3,11 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import codex_watcher, rebuild_inbox_tree
 
@@ -113,33 +108,29 @@ def create_local_repo_with_main_branch(root: Path, name: str = "demo-repo") -> P
 
 
 def test_dry_run_single_prompt_flows_inbox_to_processed(
-    pv_root: PromptValetRoot, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    pv_root: PromptValetRoot,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ensure the watcher can claim a prompt, run Codex, and archive processed output."""
     caplog.set_level(logging.INFO, logger="codex_watcher")
 
     repo_owner_dir = pv_root.repos_root / "test-owner"
-    repo = create_local_repo_with_main_branch(repo_owner_dir, "demo-repo")
+    create_local_repo_with_main_branch(repo_owner_dir, "demo-repo")
     repo_inbox = pv_root.inbox_dir / "demo-repo" / "main"
     repo_inbox.mkdir(parents=True, exist_ok=True)
     prompt = repo_inbox / "test-prompt.prompt.md"
     prompt.write_text("# test prompt\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        rebuild_inbox_tree, "INBOX_ROOT", pv_root.inbox_dir
-    )
-    monkeypatch.setattr(
-        rebuild_inbox_tree, "REPOS_ROOT", repo_owner_dir
-    )
-    monkeypatch.setattr(
-        rebuild_inbox_tree, "DEFAULT_CONFIG_PATH", pv_root.config_path
-    )
-    monkeypatch.setattr(
-        codex_watcher, "DEFAULT_CONFIG_PATH", pv_root.config_path
-    )
+    monkeypatch.setattr(rebuild_inbox_tree, "INBOX_ROOT", pv_root.inbox_dir)
+    monkeypatch.setattr(rebuild_inbox_tree, "REPOS_ROOT", repo_owner_dir)
+    monkeypatch.setattr(rebuild_inbox_tree, "DEFAULT_CONFIG_PATH", pv_root.config_path)
+    monkeypatch.setattr(codex_watcher, "DEFAULT_CONFIG_PATH", pv_root.config_path)
     monkeypatch.setattr(codex_watcher, "DEBOUNCE_SECONDS", 0)
 
-    def fake_run_codex_for_job(repo_dir: Path, job: codex_watcher.Job, run_root: Path) -> None:
+    def fake_run_codex_for_job(
+        repo_dir: Path, job: codex_watcher.Job, run_root: Path
+    ) -> None:
         marker = run_root / ".codex-ok"
         marker.write_text("OK", encoding="utf-8")
 
@@ -155,9 +146,7 @@ def test_dry_run_single_prompt_flows_inbox_to_processed(
     codex_watcher.main(["--once"])
 
     assert not prompt.exists(), "prompt should be claimed and removed from inbox"
-    processed_branch = (
-        pv_root.processed_dir / "test-owner" / "demo-repo" / "main"
-    )
+    processed_branch = pv_root.processed_dir / "test-owner" / "demo-repo" / "main"
     run_dirs = list(processed_branch.iterdir())
     assert run_dirs, "processed directory should contain a run entry"
     prompt_copy = run_dirs[0] / "prompt.md"

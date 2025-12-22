@@ -4,15 +4,10 @@ import copy
 import subprocess
 import textwrap
 from pathlib import Path
-import sys
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from scripts import rebuild_inbox_tree  # noqa: E402
+from scripts import rebuild_inbox_tree
 
 
 def _run_git(args: list[str], cwd: Path | None = None) -> None:

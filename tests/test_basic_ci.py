@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
 CONFIGS_DIR = ROOT / "configs"
 
+
 def test_scripts_exist():
     """Core Prompt Valet scripts should exist in the expected location."""
     watcher = SCRIPTS_DIR / "codex_watcher.py"
@@ -17,6 +18,7 @@ def test_scripts_exist():
 
     assert watcher.is_file(), f"Missing script: {watcher}"
     assert tree_builder.is_file(), f"Missing script: {tree_builder}"
+
 
 def test_scripts_compile():
     """Python bytecode compilation sanity check (no syntax errors)."""
@@ -26,8 +28,10 @@ def test_scripts_compile():
         # Will raise PyCompileError on failure
         py_compile.compile(str(path), doraise=True)
 
+
 def _load_source(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
 
 def test_default_config_path_and_logging_contract():
     """
@@ -41,8 +45,12 @@ def test_default_config_path_and_logging_contract():
     # DEFAULT_CONFIG_PATH should reference the canonical YAML path in both scripts
     expected_path = "/srv/prompt-valet/config/prompt-valet.yaml"
 
-    assert expected_path in watcher_src, "Watcher script is not using the canonical config path"
-    assert expected_path in tree_src, "Tree-builder script is not using the canonical config path"
+    assert (
+        expected_path in watcher_src
+    ), "Watcher script is not using the canonical config path"
+    assert (
+        expected_path in tree_src
+    ), "Tree-builder script is not using the canonical config path"
 
     # Logging contract: shared prefix and key labels
     log_pattern = re.escape("[prompt-valet] loaded config=")
@@ -50,9 +58,19 @@ def test_default_config_path_and_logging_contract():
         ("codex_watcher.py", watcher_src),
         ("rebuild_inbox_tree.py", tree_src),
     ]:
-        assert re.search(log_pattern, src), f"{name} missing prompt-valet startup log line"
-        for key in ("inbox=", "processed=", "git_owner=", "git_host=", "git_protocol=", "runner="):
+        assert re.search(
+            log_pattern, src
+        ), f"{name} missing prompt-valet startup log line"
+        for key in (
+            "inbox=",
+            "processed=",
+            "git_owner=",
+            "git_host=",
+            "git_protocol=",
+            "runner=",
+        ):
             assert key in src, f"{name} startup log does not include {key}"
+
 
 def test_example_config_yaml_parses_and_has_expected_sections():
     """
@@ -70,9 +88,15 @@ def test_example_config_yaml_parses_and_has_expected_sections():
 
     if "file_server" in data:
         file_server = data["file_server"]
-        assert isinstance(file_server, dict), "prompt-valet.yaml file_server must be a mapping"
-        assert "inbox_dir" in file_server, "prompt-valet.yaml file_server missing [inbox_dir]"
-        assert "processed_dir" in file_server, "prompt-valet.yaml file_server missing [processed_dir]"
+        assert isinstance(
+            file_server, dict
+        ), "prompt-valet.yaml file_server must be a mapping"
+        assert (
+            "inbox_dir" in file_server
+        ), "prompt-valet.yaml file_server missing [inbox_dir]"
+        assert (
+            "processed_dir" in file_server
+        ), "prompt-valet.yaml file_server missing [processed_dir]"
     else:
         for key in ("inbox", "processed"):
             assert key in data, f"prompt-valet.yaml missing [{key}] in flat schema"
@@ -81,11 +105,15 @@ def test_example_config_yaml_parses_and_has_expected_sections():
         assert section in data, f"prompt-valet.yaml missing [{section}] section"
 
     watcher_cfg = data["watcher"]
-    assert isinstance(watcher_cfg, dict), "prompt-valet.yaml watcher section must be a mapping"
+    assert isinstance(
+        watcher_cfg, dict
+    ), "prompt-valet.yaml watcher section must be a mapping"
 
     if "runner" in data:
         runner_cfg = data["runner"]
-        assert isinstance(runner_cfg, dict), "prompt-valet.yaml runner section must be a mapping"
+        assert isinstance(
+            runner_cfg, dict
+        ), "prompt-valet.yaml runner section must be a mapping"
     else:
         for key in ("runner_cmd", "runner_model"):
             assert (

@@ -1,10 +1,5 @@
 from pathlib import Path
 import logging
-import sys
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import codex_watcher
 
@@ -53,9 +48,7 @@ def test_ensure_worker_repo_clean_and_synced_dirty_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_watcher, "ensure_repo_cloned", _fake_ensure_repo_cloned)
     logger = logging.getLogger("test")
 
-    ok = codex_watcher.ensure_worker_repo_clean_and_synced(
-        repo, base_branch, logger
-    )
+    ok = codex_watcher.ensure_worker_repo_clean_and_synced(repo, base_branch, logger)
 
     assert ok is True
     assert calls == expected_calls
@@ -92,15 +85,15 @@ def test_ensure_worker_repo_clean_and_synced_clean_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(codex_watcher, "ensure_repo_cloned", _fake_ensure_repo_cloned)
     logger = logging.getLogger("test")
 
-    ok = codex_watcher.ensure_worker_repo_clean_and_synced(
-        repo, base_branch, logger
-    )
+    ok = codex_watcher.ensure_worker_repo_clean_and_synced(repo, base_branch, logger)
 
     assert ok is True
     assert calls == expected_calls
 
 
-def test_ensure_worker_repo_clean_and_synced_status_failure(tmp_path, monkeypatch, caplog):
+def test_ensure_worker_repo_clean_and_synced_status_failure(
+    tmp_path, monkeypatch, caplog
+):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()

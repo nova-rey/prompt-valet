@@ -1,11 +1,5 @@
 from pathlib import Path
 import subprocess
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import codex_watcher
 
@@ -52,6 +46,8 @@ def test_git_sync_rejects_non_git_directory(tmp_path):
         codex_watcher.run_git_sync(str(non_git_dir))
     except RuntimeError as exc:
         # We expect this to fail with a clear message.
-        assert "not a Git repository" in str(exc) or "Git synchronization failed" in str(exc)
+        assert "not a Git repository" in str(
+            exc
+        ) or "Git synchronization failed" in str(exc)
     else:
         raise AssertionError("Expected run_git_sync to fail on a non-git directory.")
