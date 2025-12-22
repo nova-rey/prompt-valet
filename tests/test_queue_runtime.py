@@ -18,7 +18,7 @@ def test_enqueue_job_creates_files(tmp_path):
     job_dir = root / job.job_id
     assert job_dir.is_dir()
     assert (job_dir / queue_runtime.STATE_FILE).read_text().strip() == queue_runtime.STATE_QUEUED
-    metadata = json.loads((job_dir / queue_runtime.META_FILE).read_text())
+    metadata = json.loads((job_dir / queue_runtime.JOB_FILE).read_text())
     assert metadata["git_owner"] == "owner"
     assert metadata["retries"] == 0
     assert metadata["metadata"]["reason"] == "new-prompt"
@@ -118,6 +118,6 @@ def test_get_next_queued_job_skips_invalid(tmp_path):
     root = tmp_path / "jobs"
     bad = root / "bad"
     bad.mkdir(parents=True)
-    (bad / queue_runtime.META_FILE).write_text("not-json")
+    (bad / queue_runtime.JOB_FILE).write_text("not-json")
 
     assert queue_runtime.get_next_queued_job(root) is None

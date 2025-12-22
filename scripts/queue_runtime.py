@@ -4,13 +4,16 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 STATE_FILE = "state"
-META_FILE = "meta.json"
+JOB_FILE = "job.json"
+
+JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 STATE_QUEUED = "queued"
 STATE_RUNNING = "running"
@@ -25,6 +28,30 @@ VALID_STATES = {
     STATE_FAILED_RETRYABLE,
     STATE_FAILED_FINAL,
 }
+
+STATE_TRANSITIONS = {
+    STATE_QUEUED: {STATE_RUNNING, STATE_FAILED_FINAL},
+    STATE_RUNNING: {
+        STATE_SUCCEEDED,
+        STATE_FAILED_RETRYABLE,
+        STATE_FAILED_FINAL,
+    },
+    STATE_FAILED_RETRYABLE: {STATE_QUEUED, STATE_FAILED_FINAL},
+    STATE_SUCCEEDED: set(),
+    STATE_FAILED_FINAL: set(),
+}
+
+
+def _transition_job(job: JobRecord, next_state: str) -> None:
+    current = job.state
+    allowed = STATE_TRANSITIONS.get(current)
+    if allowed is None:
+        raise RuntimeError(f"Unknown current state '{current}' for job {job.job_id}")
+    if next_state not in allowed:
+        raise RuntimeError(
+            f"Illegal transition from {current} to {next_state} for job {job.job_id}"
+        )
+    job.state = next_state
 
 
 def _utc_iso_now() -> str:
@@ -44,8 +71,22 @@ def _job_dir(root: Path, job_id: str) -> Path:
     return root / job_id
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _atomic_write_json(path: Path, meta: Dict[str, Any]) -> None:
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as fp:
+        json.dump(meta, fp, indent=2, sort_keys=True)
+        fp.write("\n")
+    os.replace(tmp, path)
+
+
 def _write_state(path: Path, state: str) -> None:
-    path.write_text(state, encoding="utf-8")
+    _atomic_write_text(path, state)
 
 
 def _load_state(path: Path) -> Optional[str]:
@@ -55,17 +96,82 @@ def _load_state(path: Path) -> Optional[str]:
     return path.read_text(encoding="utf-8").strip()
 
 
-def _write_meta(path: Path, meta: Dict[str, Any]) -> None:
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as fp:
-        json.dump(meta, fp, indent=2, sort_keys=True)
-        fp.write("\n")
-    os.replace(tmp, path)
+def _write_job(path: Path, meta: Dict[str, Any]) -> None:
+    _atomic_write_json(path, meta)
 
 
-def _load_meta(path: Path) -> Optional[Dict[str, Any]]:
+def _validate_job_payload(data: Dict[str, Any], path: Path) -> bool:
+    if not isinstance(data, dict):
+        logger.warning("Job payload %s is not an object; skipping", path)
+        return False
+
+    required_strings = (
+        "job_id",
+        "git_owner",
+        "repo_name",
+        "branch_name",
+        "inbox_file",
+        "inbox_rel",
+        "state",
+        "created_at",
+        "updated_at",
+    )
+    for name in required_strings:
+        value = data.get(name)
+        if not isinstance(value, str) or not value:
+            logger.warning(
+                "Job payload %s missing or invalid string field %s=%r",
+                path,
+                name,
+                value,
+            )
+            return False
+
+    schema_state = data["state"]
+    if schema_state not in VALID_STATES:
+        logger.warning(
+            "Job payload %s has invalid state %r", path, schema_state
+        )
+        return False
+
+    job_id = data["job_id"]
+    if not JOB_ID_PATTERN.fullmatch(job_id):
+        logger.warning(
+            "Job payload %s has invalid job_id %r", path, job_id
+        )
+        return False
+
+    retries = data.get("retries")
+    if not isinstance(retries, int) or retries < 0:
+        logger.warning(
+            "Job payload %s has non-integer retries %r", path, retries
+        )
+        return False
+
+    metadata = data.get("metadata", {})
+    if not isinstance(metadata, dict):
+        logger.warning(
+            "Job payload %s has invalid metadata %r", path, metadata
+        )
+        return False
+
+    for optional in ("processed_path", "failure_reason", "archived_path"):
+        value = data.get(optional)
+        if value is not None and not isinstance(value, str):
+            logger.warning(
+                "Job payload %s has invalid optional field %s=%r",
+                path,
+                optional,
+                value,
+            )
+            return False
+
+    return True
+
+
+def _load_job(path: Path) -> Optional[Dict[str, Any]]:
     if not path.exists():
-        logger.debug("Skipping job %s without meta", path)
+        logger.debug("Skipping job %s without metadata", path)
         return None
     try:
         with path.open("r", encoding="utf-8") as fp:
@@ -73,8 +179,7 @@ def _load_meta(path: Path) -> Optional[Dict[str, Any]]:
     except (json.JSONDecodeError, OSError) as exc:
         logger.warning("Unable to load job metadata (%s): %s", path, exc)
         return None
-    if not isinstance(data, dict):
-        logger.warning("Job metadata at %s is not an object; skipping", path)
+    if not _validate_job_payload(data, path):
         return None
     return data
 
@@ -100,14 +205,14 @@ class JobRecord:
     @classmethod
     def from_disk(cls, job_dir: Path) -> Optional["JobRecord"]:
         state_path = job_dir / STATE_FILE
-        meta_path = job_dir / META_FILE
+        job_path = job_dir / JOB_FILE
         state = _load_state(state_path)
         if not state or state not in VALID_STATES:
             logger.warning(
                 "Skipping job %s: invalid or missing state %r", job_dir, state
             )
             return None
-        meta = _load_meta(meta_path)
+        meta = _load_job(job_path)
         if meta is None:
             return None
         return cls(
@@ -150,7 +255,7 @@ class JobRecord:
 def _persist_job(job: JobRecord) -> None:
     job.metadata = dict(job.metadata)
     job.updated_at = _utc_iso_now()
-    _write_meta(job.job_dir / META_FILE, job.to_meta())
+    _write_job(job.job_dir / JOB_FILE, job.to_meta())
     _write_state(job.job_dir / STATE_FILE, job.state)
 
 
@@ -196,7 +301,7 @@ def enqueue_job(
     }
     if reason:
         data["metadata"].setdefault("reason", reason)
-    _write_meta(job_dir / META_FILE, data)
+    _write_job(job_dir / JOB_FILE, data)
     _write_state(job_dir / STATE_FILE, STATE_QUEUED)
     job = JobRecord.from_disk(job_dir)
     if job is None:
@@ -242,14 +347,14 @@ def find_job_for_inbox(jobs_root: Path | str, inbox_file: str) -> Optional[JobRe
 
 
 def mark_running(job: JobRecord, *, reason: Optional[str] = None) -> JobRecord:
-    job.state = STATE_RUNNING
+    _transition_job(job, STATE_RUNNING)
     job.metadata["last_reason"] = reason or job.metadata.get("last_reason")
     _persist_job(job)
     return job
 
 
 def mark_succeeded(job: JobRecord, *, processed_path: str) -> JobRecord:
-    job.state = STATE_SUCCEEDED
+    _transition_job(job, STATE_SUCCEEDED)
     job.processed_path = processed_path
     job.metadata.pop("last_failure", None)
     _persist_job(job)
@@ -263,7 +368,8 @@ def mark_failed(
     reason: Optional[str] = None,
     archived_path: Optional[str] = None,
 ) -> JobRecord:
-    job.state = STATE_FAILED_RETRYABLE if retryable else STATE_FAILED_FINAL
+    next_state = STATE_FAILED_RETRYABLE if retryable else STATE_FAILED_FINAL
+    _transition_job(job, next_state)
     job.failure_reason = reason
     job.metadata["last_failure"] = reason
     job.archived_path = archived_path
@@ -276,7 +382,7 @@ def should_retry(job: JobRecord, max_retries: int) -> bool:
 
 
 def requeue(job: JobRecord) -> JobRecord:
-    job.state = STATE_QUEUED
+    _transition_job(job, STATE_QUEUED)
     job.retries += 1
     job.metadata["last_retry"] = _utc_iso_now()
     _persist_job(job)
