@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Prompt Valet Job Record",
+  "description": "Structure for the JSON metadata persisted alongside each job directory (job.json).",
+  "type": "object",
+  "required": [
+    "job_id",
+    "git_owner",
+    "repo_name",
+    "branch_name",
+    "inbox_file",
+    "inbox_rel",
+    "state",
+    "retries",
+    "created_at",
+    "updated_at",
+    "metadata"
+  ],
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$",
+      "description": "UUIDv4 represented as 32 lowercase hex digits without hyphens."
+    },
+    "git_owner": { "type": "string", "minLength": 1 },
+    "repo_name": { "type": "string", "minLength": 1 },
+    "branch_name": { "type": "string", "minLength": 1 },
+    "inbox_file": { "type": "string", "minLength": 1 },
+    "inbox_rel": { "type": "string", "minLength": 1 },
+    "state": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed_retryable",
+        "failed_final"
+      ]
+    },
+    "retries": { "type": "integer", "minimum": 0 },
+    "created_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC timestamp in ISO 8601 with second-level precision."
+    },
+    "updated_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "metadata": { "type": "object" },
+    "processed_path": { "type": ["string", "null"], "minLength": 1 },
+    "failure_reason": { "type": ["string", "null"], "minLength": 1 },
+    "archived_path": { "type": ["string", "null"], "minLength": 1 }
+  },
+  "additionalProperties": true
+}
