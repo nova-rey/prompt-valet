@@ -17,6 +17,7 @@ This version:
 import argparse
 import copy
 import datetime as dt
+import json
 import logging
 import os
 import queue
@@ -67,6 +68,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
 }
 
+RUNS_DIR_NAME = "runs"
+JOB_METADATA_FILENAME = "job.json"
+STATE_FILENAME = "state"
+JOB_LOG_NAME = "job.log"
+ABORT_FILENAME = "ABORT"
+HEARTBEAT_INTERVAL_SECONDS = 5.0
+
 # Simple global-ish config; populated in main()
 CONFIG: Dict[str, Any] = {}
 INBOX_MODE = "legacy_single_owner"
@@ -112,6 +120,20 @@ def _emit_job_event(
         for key, value in extra.items():
             parts.append(f"{key}={value}")
     log("[prompt-valet] " + " ".join(parts))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fp:
+        json.dump(data, fp, indent=2, sort_keys=True)
+        fp.write("\n")
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -859,8 +881,12 @@ def load_config() -> tuple[Dict[str, Any], Path]:
     repos_root.mkdir(parents=True, exist_ok=True)
     failed_root.mkdir(parents=True, exist_ok=True)
 
+    runs_root = pv_root / RUNS_DIR_NAME
+    runs_root.mkdir(parents=True, exist_ok=True)
+
     cfg["pv_root"] = str(pv_root)
     cfg["queue"] = queue_cfg
+    cfg["runs"] = str(runs_root)
 
     runner_cmd = watcher_cfg.get("runner_cmd", "codex")
     log(
@@ -869,6 +895,7 @@ def load_config() -> tuple[Dict[str, Any], Path]:
         f"inbox={inbox_root} "
         f"processed={processed_root} "
         f"pv_root={pv_root} "
+        f"runs={runs_root} "
         f"git_owner={cfg.get('git_owner')} "
         f"git_host={cfg.get('git_host')} "
         f"git_protocol={watcher_cfg.get('git_protocol', 'https')} "
@@ -890,7 +917,11 @@ def load_config_from_dict(cfg: Dict[str, Any]) -> Dict[str, Any]:
             normalized[key].update(value)  # type: ignore[arg-type]
         else:
             normalized[key] = value
-    return normalize_config(normalized)
+    normalized = normalize_config(normalized)
+    pv_root = Path(normalized.get("pv_root", DEFAULT_PV_ROOT)).expanduser().resolve()
+    runs_root = pv_root / RUNS_DIR_NAME
+    normalized["runs"] = str(runs_root)
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -910,6 +941,118 @@ class Job:
     prompt_path: Path
 
 
+class JobAbortedError(RuntimeError):
+    """Raised when a job is terminated via the ABORT handshake."""
+
+
+class JobMetadataWriter:
+    def __init__(self, job_dir: Path, payload: Dict[str, Any]) -> None:
+        self._job_dir = job_dir
+        self._job_json_path = job_dir / JOB_METADATA_FILENAME
+        self._state_path = job_dir / STATE_FILENAME
+        self.log_path = job_dir / JOB_LOG_NAME
+        self._lock = threading.Lock()
+        self._payload: Dict[str, Any] = dict(payload)
+        self._persist_locked()
+
+    def _persist_locked(self) -> None:
+        _atomic_write_json(self._job_json_path, self._payload)
+        _atomic_write_text(self._state_path, self._payload["state"])
+
+    @property
+    def job_dir(self) -> Path:
+        return self._job_dir
+
+    def update(self, **kwargs: Any) -> None:
+        with self._lock:
+            self._payload.update(kwargs)
+            self._payload["updated_at"] = now_utc_iso()
+            self._persist_locked()
+
+    def heartbeat(self) -> None:
+        with self._lock:
+            ts = now_utc_iso()
+            self._payload["heartbeat_at"] = ts
+            self._payload["updated_at"] = ts
+            self._persist_locked()
+
+    def finalize(
+        self,
+        *,
+        state: str,
+        exit_code: Optional[int],
+        finished_at: str,
+    ) -> None:
+        with self._lock:
+            self._payload.update(
+                state=state,
+                exit_code=exit_code,
+                finished_at=finished_at,
+            )
+            self._payload["updated_at"] = now_utc_iso()
+            self._persist_locked()
+
+    @property
+    def job_id(self) -> str:
+        return self._payload["job_id"]
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    for _ in range(10):
+        if proc.poll() is not None:
+            return
+        time.sleep(0.1)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _start_job_heartbeat(
+    proc: subprocess.Popen,
+    job_writer: JobMetadataWriter,
+    stop_event: threading.Event,
+    abort_event: threading.Event,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+) -> threading.Thread:
+    def _heartbeat_loop() -> None:
+        while not stop_event.is_set():
+            if abort_event.is_set():
+                break
+            job_writer.heartbeat()
+            abort_path = job_writer.job_dir / ABORT_FILENAME
+            if abort_path.exists():
+                log(
+                    f"Detected abort marker for job {job_writer.job_id}; terminating process."
+                )
+                abort_event.set()
+                _terminate_process(proc)
+                break
+            stop_event.wait(interval)
+
+    thread = threading.Thread(target=_heartbeat_loop, daemon=True)
+    thread.start()
+    return thread
+
+
+def _append_to_job_log(log_path: Path, stdout: str, stderr: str) -> None:
+    if not stdout and not stderr:
+        return
+    with log_path.open("a", encoding="utf-8") as fp:
+        if stdout:
+            fp.write("=== STDOUT ===\n")
+            fp.write(stdout.rstrip("\n") + "\n")
+        if stderr:
+            fp.write("=== STDERR ===\n")
+            fp.write(stderr.rstrip("\n") + "\n")
+
+
 def get_job_base_branch(job: Job) -> str:
     """
     Return the upstream base branch this job should target.
@@ -926,7 +1069,12 @@ class MissingBaseBranchError(RuntimeError):
     """Raised when the desired base branch is absent on the upstream remote."""
 
 
-def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path) -> None:
+def run_codex_for_job(
+    repo_dir: Path,
+    job: Job,
+    run_root: Path,
+    job_writer: JobMetadataWriter,
+) -> None:
     """
     Invoke the Codex CLI using the prompt file as the input prompt.
 
@@ -971,19 +1119,50 @@ def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path) -> None:
     ]
 
     log(f"Running Codex CLI for job {job!r}")
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         cli_cmd,
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         env=env,
     )
-    if proc.stdout:
-        log(f"codex STDOUT:\n{proc.stdout.rstrip()}")
-    if proc.stderr:
-        log(f"codex STDERR:\n{proc.stderr.rstrip()}")
+    job_writer.update(pid=proc.pid)
+    stop_event = threading.Event()
+    abort_event = threading.Event()
+    heartbeat_thread = _start_job_heartbeat(proc, job_writer, stop_event, abort_event)
 
-    if proc.returncode != 0:
-        raise RuntimeError(f"Codex CLI failed with code {proc.returncode}: {cli_cmd!r}")
+    stdout = ""
+    stderr = ""
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        stop_event.set()
+        heartbeat_thread.join()
+
+    _append_to_job_log(job_writer.log_path, stdout, stderr)
+
+    if stdout:
+        log(f"codex STDOUT:\n{stdout.rstrip()}")
+    if stderr:
+        log(f"codex STDERR:\n{stderr.rstrip()}")
+
+    exit_code = proc.returncode
+    finished_at = now_utc_iso()
+    if abort_event.is_set():
+        job_writer.finalize(
+            state="aborted", exit_code=exit_code, finished_at=finished_at
+        )
+        raise JobAbortedError(
+            f"Codex CLI aborted via ABORT marker for job {job.job_id}"
+        )
+
+    if exit_code != 0:
+        job_writer.finalize(
+            state="failed", exit_code=exit_code, finished_at=finished_at
+        )
+        raise RuntimeError(f"Codex CLI failed with code {exit_code}: {cli_cmd!r}")
+
+    job_writer.finalize(state="succeeded", exit_code=exit_code, finished_at=finished_at)
 
 
 def create_pr_for_job(job: Job, repo_dir: Path, logger: logging.Logger) -> None:
@@ -1138,6 +1317,32 @@ def run_prompt_job(job: Job) -> bool:
     job_branch = job.branch_name
     prepare_branch(repo_dir, job_branch, base_branch=base_branch)
 
+    runs_root = Path(CONFIG["runs"])
+    job_meta_dir = runs_root / job.job_id
+    job_meta_dir.mkdir(parents=True, exist_ok=True)
+    job_log_path = job_meta_dir / JOB_LOG_NAME
+    abort_marker = job_meta_dir / ABORT_FILENAME
+    if abort_marker.exists():
+        abort_marker.unlink()
+
+    started_at = now_utc_iso()
+    job_writer_payload = {
+        "job_id": job.job_id,
+        "git_owner": job.git_owner,
+        "repo_name": job.repo_name,
+        "branch_name": job.branch_name,
+        "inbox_file": str(job.inbox_path),
+        "inbox_rel": str(job.inbox_rel),
+        "state": STATUS_RUNNING,
+        "created_at": started_at,
+        "updated_at": started_at,
+        "started_at": started_at,
+        "heartbeat_at": started_at,
+        "log_path": str(job_log_path),
+    }
+    job_writer = JobMetadataWriter(job_meta_dir, job_writer_payload)
+    job_writer.log_path.write_text("", encoding="utf-8")
+
     run_root = job.run_root
     run_root.mkdir(parents=True, exist_ok=True)
     prompt_path = Path(job.prompt_path)
@@ -1153,7 +1358,7 @@ def run_prompt_job(job: Job) -> bool:
 
     if prompt_exists:
         try:
-            run_codex_for_job(repo_dir, job, run_root)
+            run_codex_for_job(repo_dir, job, run_root, job_writer)
             codex_success = True
         except Exception:
             logger.exception("Codex run failed for job %s; skipping PR.", job.job_id)
@@ -1169,6 +1374,8 @@ def run_prompt_job(job: Job) -> bool:
             "referenced inbox paths or moved itself. Execution continued "
             "safely.\n"
         )
+        finished_at = now_utc_iso()
+        job_writer.finalize(state="succeeded", exit_code=None, finished_at=finished_at)
         codex_success = True
 
     if codex_success:
