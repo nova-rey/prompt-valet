@@ -129,30 +129,22 @@ def _validate_job_payload(data: Dict[str, Any], path: Path) -> bool:
 
     schema_state = data["state"]
     if schema_state not in VALID_STATES:
-        logger.warning(
-            "Job payload %s has invalid state %r", path, schema_state
-        )
+        logger.warning("Job payload %s has invalid state %r", path, schema_state)
         return False
 
     job_id = data["job_id"]
     if not JOB_ID_PATTERN.fullmatch(job_id):
-        logger.warning(
-            "Job payload %s has invalid job_id %r", path, job_id
-        )
+        logger.warning("Job payload %s has invalid job_id %r", path, job_id)
         return False
 
     retries = data.get("retries")
     if not isinstance(retries, int) or retries < 0:
-        logger.warning(
-            "Job payload %s has non-integer retries %r", path, retries
-        )
+        logger.warning("Job payload %s has non-integer retries %r", path, retries)
         return False
 
     metadata = data.get("metadata", {})
     if not isinstance(metadata, dict):
-        logger.warning(
-            "Job payload %s has invalid metadata %r", path, metadata
-        )
+        logger.warning("Job payload %s has invalid metadata %r", path, metadata)
         return False
 
     for optional in ("processed_path", "failure_reason", "archived_path"):

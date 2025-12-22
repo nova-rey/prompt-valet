@@ -55,7 +55,7 @@ def _claim_prompt(tmp_path, rel: Path):
 
 def test_non_queue_mode_uses_direct_runner(tmp_path, monkeypatch):
     cfg = _setup_config(tmp_path, queue_enabled=False)
-    running = _claim_prompt(tmp_path, Path("repo/main/prompt.prompt.md"))
+    _claim_prompt(tmp_path, Path("repo/main/prompt.prompt.md"))
 
     called = []
 
@@ -76,7 +76,9 @@ def test_non_queue_mode_uses_direct_runner(tmp_path, monkeypatch):
 
     job = job_queue.get_nowait()
     assert codex_watcher.run_prompt_job(job)
-    codex_watcher.JOB_STATES[codex_watcher._job_key(job.inbox_rel)] = codex_watcher.STATUS_DONE
+    codex_watcher.JOB_STATES[codex_watcher._job_key(job.inbox_rel)] = (
+        codex_watcher.STATUS_DONE
+    )
     codex_watcher.finalize_inbox_prompt(
         inbox_root=tmp_path / "inbox",
         finished_root=tmp_path / "finished",

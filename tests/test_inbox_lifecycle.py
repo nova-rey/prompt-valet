@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import os
 import queue
 import time
@@ -10,15 +8,11 @@ from scripts import codex_watcher
 
 def test_statusified_name_prompt_to_running():
     assert (
-        codex_watcher._statusified_name(
-            "xyz.prompt.md", codex_watcher.STATUS_RUNNING
-        )
+        codex_watcher._statusified_name("xyz.prompt.md", codex_watcher.STATUS_RUNNING)
         == "xyz.running.md"
     )
     assert (
-        codex_watcher._statusified_name(
-            "foo.txt", codex_watcher.STATUS_RUNNING
-        )
+        codex_watcher._statusified_name("foo.txt", codex_watcher.STATUS_RUNNING)
         == "foo.running.txt"
     )
 

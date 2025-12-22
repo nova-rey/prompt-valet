@@ -167,7 +167,9 @@ def _run_git(
     return proc
 
 
-def run_git(args, cwd: Path, allow_failure: bool = False) -> subprocess.CompletedProcess:
+def run_git(
+    args, cwd: Path, allow_failure: bool = False
+) -> subprocess.CompletedProcess:
     """
     Run a git command, logging stdout/stderr.
 
@@ -490,10 +492,14 @@ def run_git_sync(repo_path: str) -> None:
             "(fetch + reset --hard origin/main)."
         )
     except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode(errors="ignore") if getattr(e, "stderr", None) else str(e)
+        stderr = (
+            e.stderr.decode(errors="ignore") if getattr(e, "stderr", None) else str(e)
+        )
         print("[codex_watcher] ERROR: Git synchronization failed.")
         print(stderr)
-        raise RuntimeError("Git synchronization failed; aborting prompt execution.") from e
+        raise RuntimeError(
+            "Git synchronization failed; aborting prompt execution."
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -657,13 +663,7 @@ def start_jobs_from_running(
 
         assert job_queue is not None
         run_id = dt.datetime.utcnow().strftime("%Y%m%d-%H%M-%S")
-        run_root = (
-            processed_root
-            / git_owner
-            / repo_name
-            / branch_name
-            / run_id
-        )
+        run_root = processed_root / git_owner / repo_name / branch_name / run_id
         run_root.mkdir(parents=True, exist_ok=True)
 
         prompt_copy_path = run_root / "prompt.md"
@@ -688,10 +688,7 @@ def start_jobs_from_running(
         )
 
         JOB_STATES[key] = STATUS_RUNNING
-        log(
-            "[prompt-valet] queued job "
-            f"prompt={prompt_rel} run_root={run_root}"
-        )
+        log("[prompt-valet] queued job " f"prompt={prompt_rel} run_root={run_root}")
         job_queue.put(job)
 
 
@@ -720,10 +717,7 @@ def _enqueue_queue_job(
     )
 
     JOB_STATES[key] = STATUS_RUNNING
-    log(
-        "[prompt-valet] enqueued job "
-        f"prompt={prompt_rel} queue={job_record.job_id}"
-    )
+    log("[prompt-valet] enqueued job " f"prompt={prompt_rel} queue={job_record.job_id}")
     _emit_job_event(
         "job.created",
         job_record=job_record,
@@ -745,9 +739,7 @@ def claim_new_prompts(inbox_root: Path) -> None:
         if not path.is_file():
             continue
 
-        running_candidate = path.with_name(
-            _statusified_name(path.name, STATUS_RUNNING)
-        )
+        running_candidate = path.with_name(_statusified_name(path.name, STATUS_RUNNING))
         if running_candidate.exists():
             continue
 
@@ -817,10 +809,7 @@ def load_config() -> tuple[Dict[str, Any], Path]:
             if not isinstance(user_cfg, dict):
                 raise ValueError("YAML config is not a mapping at the top level")
             for key, value in user_cfg.items():
-                if (
-                    isinstance(value, dict)
-                    and isinstance(cfg.get(key), dict)
-                ):
+                if isinstance(value, dict) and isinstance(cfg.get(key), dict):
                     cfg[key].update(value)  # type: ignore
                 else:
                     cfg[key] = value
@@ -994,9 +983,7 @@ def run_codex_for_job(repo_dir: Path, job: Job, run_root: Path) -> None:
         log(f"codex STDERR:\n{proc.stderr.rstrip()}")
 
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"Codex CLI failed with code {proc.returncode}: {cli_cmd!r}"
-        )
+        raise RuntimeError(f"Codex CLI failed with code {proc.returncode}: {cli_cmd!r}")
 
 
 def create_pr_for_job(job: Job, repo_dir: Path, logger: logging.Logger) -> None:
@@ -1169,9 +1156,7 @@ def run_prompt_job(job: Job) -> bool:
             run_codex_for_job(repo_dir, job, run_root)
             codex_success = True
         except Exception:
-            logger.exception(
-                "Codex run failed for job %s; skipping PR.", job.job_id
-            )
+            logger.exception("Codex run failed for job %s; skipping PR.", job.job_id)
             raise
     else:
         log(
@@ -1190,9 +1175,7 @@ def run_prompt_job(job: Job) -> bool:
         try:
             create_pr_for_job(job, repo_dir, logger)
         except MissingBaseBranchError:
-            logger.exception(
-                "PR: missing base branch; marking job as failed."
-            )
+            logger.exception("PR: missing base branch; marking job as failed.")
             raise
         except Exception:
             logger.exception(
@@ -1278,11 +1261,7 @@ def _build_job_from_queue_record(
 
 def _archive_prompt_file(job: Job, target_root: Path) -> Optional[Path]:
     dest_dir = (
-        target_root
-        / job.git_owner
-        / job.repo_name
-        / job.branch_name
-        / job.job_id
+        target_root / job.git_owner / job.repo_name / job.branch_name / job.job_id
     )
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_path = dest_dir / job.inbox_rel.name

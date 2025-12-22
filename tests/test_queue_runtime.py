@@ -17,7 +17,9 @@ def test_enqueue_job_creates_files(tmp_path):
 
     job_dir = root / job.job_id
     assert job_dir.is_dir()
-    assert (job_dir / queue_runtime.STATE_FILE).read_text().strip() == queue_runtime.STATE_QUEUED
+    assert (
+        job_dir / queue_runtime.STATE_FILE
+    ).read_text().strip() == queue_runtime.STATE_QUEUED
     metadata = json.loads((job_dir / queue_runtime.JOB_FILE).read_text())
     assert metadata["git_owner"] == "owner"
     assert metadata["retries"] == 0
@@ -77,7 +79,7 @@ def test_next_queued_job_orders_by_creation(monkeypatch, tmp_path):
         inbox_file="/inbox/a.running.md",
         inbox_rel="a.prompt.md",
     )
-    job2 = queue_runtime.enqueue_job(
+    queue_runtime.enqueue_job(
         root,
         git_owner="owner",
         repo_name="repo",
