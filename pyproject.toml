@@ -18,6 +18,8 @@ dev = [
     "ruff",
     "black",
     "pytest",
+    "httpx",
+    "python-multipart",
 ]
 
 [tool.black]
