@@ -12,6 +12,8 @@ dependencies = [
     "uvicorn",
     "pyyaml",
     "python-multipart",
+    "httpx",
+    "nicegui",
 ]
 
 [project.optional-dependencies]
@@ -19,7 +21,6 @@ dev = [
     "ruff",
     "black",
     "pytest",
-    "httpx",
 ]
 
 

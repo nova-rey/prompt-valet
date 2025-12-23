@@ -84,3 +84,17 @@ curl -s http://127.0.0.1:8888/api/v1/jobs?stalled=true | jq .
 curl -s http://127.0.0.1:8888/api/v1/status | jq . | grep stalled_running
 ```
 If the API reports `stalled_running > 0`, inspect `/srv/prompt-valet/runs/{job_id}/job.json` and the log to see how old the last heartbeat is. Clearing a stale `ABORT` marker or restarting `prompt-valet-watcher.service` often resolves the stall.
+
+## UI service
+The NiceGUI-based UI mirrors the FastAPI control plane without touching job files or the watcher tree. Install the extras (which now include `nicegui` and `httpx`) via `pip install -e ".[dev]"`, then run:
+```
+./scripts/pv_ui.py
+```
+Customize API wiring and UI binding with:
+```
+PV_API_BASE_URL=http://127.0.0.1:8888/api/v1
+PV_UI_BIND_HOST=0.0.0.0
+PV_UI_BIND_PORT=8080
+PV_UI_API_TIMEOUT_SECONDS=5.0
+```
+The header indicator polls `/api/v1/healthz` and flashes green (reachable) or red (unreachable), while the Dashboard/Submit/Services tabs remain placeholders until further wiring is added.
