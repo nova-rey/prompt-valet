@@ -1,7 +1,11 @@
 # Prompt Valet Phase 1·C3 API
 
 ## Running the control plane
-1. Ensure the environment has FastAPI and Uvicorn (`python3 -m pip install fastapi uvicorn`).
+1. Install dependencies from the manifest:
+   ```
+   python3 -m pip install -U pip
+   python3 -m pip install -e ".[dev]"
+   ```
 2. Start the service from the repo root:
    ```
    python3 scripts/pv_api.py
