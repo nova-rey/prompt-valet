@@ -135,8 +135,26 @@ def test_upload_creates_job(tmp_path: Path) -> None:
     job = content["jobs"][0]
     inbox_path = Path(job["inbox_path"])
     assert inbox_path.exists()
+    assert job["job_id"] in inbox_path.name
+    assert inbox_path.name.endswith(".prompt.md")
     frontmatter, body = _extract_frontmatter(inbox_path.read_text())
     pv = frontmatter["pv"]
     assert pv["job_id"] == job["job_id"]
     assert pv["source"] == "api"
     assert body.strip() == "api body"
+
+
+def test_upload_accepts_any_md(tmp_path: Path) -> None:
+    client = _make_client(tmp_path)
+    response = client.post(
+        "/api/v1/jobs/upload",
+        data={"repo": "alpha", "branch": "main"},
+        files=[("files", ("note.md", "plain text\n"))],
+    )
+    assert response.status_code == 201
+    job = response.json()["jobs"][0]
+    inbox_path = Path(job["inbox_path"])
+    assert job["job_id"] in inbox_path.name
+    assert inbox_path.name.endswith(".prompt.md")
+    frontmatter, body = _extract_frontmatter(inbox_path.read_text())
+    assert body.strip() == "plain text"
