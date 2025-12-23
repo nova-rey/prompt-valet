@@ -11,6 +11,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pyyaml",
+    "python-multipart",
 ]
 
 [project.optional-dependencies]
@@ -19,8 +20,8 @@ dev = [
     "black",
     "pytest",
     "httpx",
-    "python-multipart",
 ]
+
 
 [tool.black]
 line-length = 88
