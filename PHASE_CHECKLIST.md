@@ -5,3 +5,4 @@
 - P1·C3 – FastAPI control plane exposes health/status, TreeBuilder discovery, and read-only job queries.
 - P1·C4 – FastAPI now accepts job submissions/upload, merges `pv` frontmatter, and atomically drops `.prompt.md` files into inboxes.
 - P1·C5 – Added log tail + stream endpoints and abort controls that mirror runs/<job_id> artifacts with the filesystem handshake.
+- P1·C6 – Added API hardening artifacts (service unit, env template, operator + acceptance docs) while keeping runtime behavior unchanged.
