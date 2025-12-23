@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import AsyncIterator
+
 from collections import Counter
 
 from fastapi import (
@@ -14,17 +20,24 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
 from prompt_valet import __version__
 from prompt_valet.api.config import APISettings, get_api_settings
 from prompt_valet.api.discovery import list_targets
 from prompt_valet.api.jobs import (
+    JobRecord,
     filter_jobs,
     get_job_record,
     list_job_records,
 )
 from prompt_valet.api.submissions import submit_job, submit_job_from_upload
+
+DEFAULT_LOG_LINES = 200
+LOG_TAIL_CHUNK_SIZE = 4096
+STREAM_POLL_INTERVAL_SECONDS = 0.5
+TERMINAL_STATES = {"succeeded", "failed", "aborted"}
 
 
 class JobSubmissionPayload(BaseModel):
@@ -32,6 +45,75 @@ class JobSubmissionPayload(BaseModel):
     branch: str
     markdown_text: str
     filename: str | None = None
+
+
+def _now_utc_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _is_terminal_state(state: str | None) -> bool:
+    if not state:
+        return False
+    return state.lower() in TERMINAL_STATES
+
+
+def _resolve_job_and_log(job_id: str, settings: APISettings) -> tuple[JobRecord, Path]:
+    record = get_job_record(
+        job_id, settings.runs_root, settings.stall_threshold_seconds
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    log_path_value = record.payload.get("log_path")
+    log_path = (
+        Path(log_path_value)
+        if log_path_value
+        else settings.runs_root / job_id / "job.log"
+    )
+    return record, log_path
+
+
+def _tail_file(path: Path, lines: int) -> str:
+    if lines <= 0:
+        return ""
+    with path.open("rb") as fp:
+        fp.seek(0, os.SEEK_END)
+        buffer = bytearray()
+        newline_count = 0
+        position = fp.tell()
+        while position > 0 and newline_count <= lines:
+            read_size = min(LOG_TAIL_CHUNK_SIZE, position)
+            position -= read_size
+            fp.seek(position)
+            chunk = fp.read(read_size)
+            newline_count += chunk.count(b"\n")
+            buffer[:0] = chunk
+            if position == 0:
+                break
+        text = buffer.decode("utf-8", errors="replace")
+    lines_with_endings = text.splitlines(keepends=True)
+    if not lines_with_endings:
+        return ""
+    selected = lines_with_endings[-lines:]
+    return "".join(selected)
+
+
+async def _stream_job_log_generator(
+    job_id: str, settings: APISettings, log_path: Path
+) -> AsyncIterator[str]:
+    with log_path.open("r", encoding="utf-8", errors="replace") as fp:
+        fp.seek(0)
+        while True:
+            line = fp.readline()
+            if line:
+                payload = line.rstrip("\r\n")
+                yield f"data: {payload}\n\n"
+                continue
+            record = get_job_record(
+                job_id, settings.runs_root, settings.stall_threshold_seconds
+            )
+            if record is None or _is_terminal_state(record.state_lower):
+                break
+            await asyncio.sleep(STREAM_POLL_INTERVAL_SECONDS)
 
 
 def create_app(settings: APISettings | None = None) -> FastAPI:
@@ -111,6 +193,47 @@ def create_app(settings: APISettings | None = None) -> FastAPI:
         if record is None:
             raise HTTPException(status_code=404, detail="Job not found")
         return record.to_dict()
+
+    @router.get("/jobs/{job_id}/log")
+    def job_log(
+        job_id: str,
+        lines: int = Query(DEFAULT_LOG_LINES, ge=1),
+        settings: APISettings = Depends(_settings),
+    ) -> PlainTextResponse:
+        _, log_path = _resolve_job_and_log(job_id, settings)
+        if not log_path.is_file():
+            raise HTTPException(status_code=404, detail="Job log not found")
+        payload = _tail_file(log_path, lines)
+        return PlainTextResponse(content=payload, media_type="text/plain")
+
+    @router.get("/jobs/{job_id}/log/stream")
+    def job_log_stream(job_id: str, settings: APISettings = Depends(_settings)):
+        _, log_path = _resolve_job_and_log(job_id, settings)
+        if not log_path.is_file():
+            raise HTTPException(status_code=404, detail="Job log not found")
+        generator = _stream_job_log_generator(job_id, settings, log_path)
+        return StreamingResponse(generator, media_type="text/event-stream")
+
+    @router.post("/jobs/{job_id}/abort")
+    def abort_job(
+        job_id: str, settings: APISettings = Depends(_settings)
+    ) -> dict[str, str]:
+        record, _ = _resolve_job_and_log(job_id, settings)
+        if not record.state_lower == "running":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job already terminal (state={record.state})",
+            )
+        abort_path = settings.runs_root / job_id / "ABORT"
+        if not abort_path.exists():
+            temp = abort_path.with_suffix(".tmp")
+            temp.write_text(_now_utc_iso(), encoding="utf-8")
+            os.replace(temp, abort_path)
+        return {
+            "job_id": job_id,
+            "previous_state": record.state or "",
+            "abort_requested_at": _now_utc_iso(),
+        }
 
     @router.post("/jobs", status_code=201)
     def submit_job_endpoint(
