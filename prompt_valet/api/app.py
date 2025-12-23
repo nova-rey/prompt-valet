@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from collections import Counter
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+)
+from pydantic import BaseModel
 
 from prompt_valet import __version__
 from prompt_valet.api.config import APISettings, get_api_settings
@@ -14,6 +24,14 @@ from prompt_valet.api.jobs import (
     get_job_record,
     list_job_records,
 )
+from prompt_valet.api.submissions import submit_job, submit_job_from_upload
+
+
+class JobSubmissionPayload(BaseModel):
+    repo: str
+    branch: str
+    markdown_text: str
+    filename: str | None = None
 
 
 def create_app(settings: APISettings | None = None) -> FastAPI:
@@ -93,6 +111,51 @@ def create_app(settings: APISettings | None = None) -> FastAPI:
         if record is None:
             raise HTTPException(status_code=404, detail="Job not found")
         return record.to_dict()
+
+    @router.post("/jobs", status_code=201)
+    def submit_job_endpoint(
+        payload: JobSubmissionPayload,
+        settings: APISettings = Depends(_settings),
+    ) -> dict[str, str]:
+        return submit_job(
+            settings,
+            payload.repo,
+            payload.branch,
+            payload.markdown_text,
+            filename=payload.filename,
+        )
+
+    @router.post("/jobs/upload", status_code=201)
+    async def submit_upload(
+        repo: str = Form(...),
+        branch: str = Form(...),
+        files: list[UploadFile] = File(...),
+        settings: APISettings = Depends(_settings),
+    ) -> dict[str, list[dict[str, str]]]:
+        if not files:
+            raise HTTPException(
+                status_code=400, detail="At least one Markdown file must be uploaded."
+            )
+        responses: list[dict[str, str]] = []
+        for upload in files:
+            filename = upload.filename
+            if not filename or not filename.lower().endswith(".md"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Uploaded files must have a '.md' extension.",
+                )
+            try:
+                raw = await upload.read()
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Uploaded files must be UTF-8 encoded.",
+                )
+            responses.append(
+                submit_job_from_upload(settings, repo, branch, filename, text)
+            )
+        return {"jobs": responses}
 
     app.include_router(router)
     return app
