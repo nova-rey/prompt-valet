@@ -11,3 +11,4 @@
 - P2·C3 – Submit tab now supports Compose + Upload flows through `/api/v1/jobs` and `/api/v1/jobs/upload`, including inbox target selectors, markdown/file inputs, and per-job success feedback.
 - P2·C4 – Job detail dialog now includes recent log tail, live SSE streaming, pause controls, and typed abort confirmation powered by the existing Phase 1 endpoints.
 - P2·C5 – Services tab surfaces Watcher and TreeBuilder visibility (status, heartbeat, targets) plus a manual refresh/error path using only the Phase 1 APIs.
+- P2·C6 – Hardened NiceGUI for mobile: responsive dashboard/detail controls, stacked submit/services flows, and more robust log streaming UX without touching the backend.

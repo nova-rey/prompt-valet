@@ -179,6 +179,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
     refresh_in_progress = False
 
     detail_dialog: Optional[Any] = None
+    detail_dialog_open = False
     detail_title: Optional[Any] = None
     detail_subtitle: Optional[Any] = None
     detail_state_badge: Optional[Any] = None
@@ -267,6 +268,14 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
     def _append_log_line(line: str) -> None:
         log_lines.append(line)
         _render_log_buffer()
+
+    def _copy_job_id(_: Any) -> None:
+        job_id = current_job_id
+        if not job_id:
+            ui.notify("Select a job before copying the ID.", color="warning")
+            return
+        ui.run_javascript(f"navigator.clipboard.writeText({json.dumps(job_id)})")
+        ui.notify("Job ID copied to clipboard.", color="positive")
 
     def _set_sse_status(text: str) -> None:
         if sse_status_label is not None:
@@ -521,6 +530,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         _update_abort_button_state(current_job_state_lower)
 
     async def _show_job_detail(job_id: str) -> None:
+        nonlocal detail_dialog_open
         if detail_dialog is None:
             return
         _prepare_for_job(job_id)
@@ -529,6 +539,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             detail_error_label.visible = False
         if detail_loading_label is not None:
             detail_loading_label.visible = True
+        detail_dialog_open = True
         detail_dialog.open()
         try:
             job = await client.get_job_detail(job_id)
@@ -555,14 +566,27 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             jobs_table.selected.clear()
 
     def _handle_detail_close() -> None:
+        nonlocal detail_dialog_open
+        detail_dialog_open = False
         _stop_live_stream("Live logs paused")
         if detail_dialog is not None:
             detail_dialog.close()
 
+    def _handle_detail_dialog_closed(_: Any) -> None:
+        nonlocal detail_dialog_open
+        detail_dialog_open = False
+        _stop_live_stream("Live logs paused")
+
     detail_dialog = ui.dialog()
     with detail_dialog:
-        with ui.card().classes("w-full max-w-4xl p-4"):
-            detail_title = ui.label("Job").classes("text-lg font-semibold")
+        with (
+            ui.card()
+            .classes("w-full max-w-4xl p-4")
+            .style("max-height: calc(100vh - 120px); overflow-y: auto;")
+        ):
+            with ui.row().classes("items-center gap-3 flex-wrap"):
+                detail_title = ui.label("Job").classes("text-lg font-semibold")
+                ui.button("Copy ID", on_click=_copy_job_id).props("flat")
             detail_subtitle = ui.label("").classes("text-sm text-gray-500")
             with ui.row().classes("items-center gap-3 mt-1"):
                 detail_state_badge = ui.label("State")
@@ -580,7 +604,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 detail_timestamp_labels[field] = ui.label("").classes(
                     "text-sm text-gray-600"
                 )
-            with ui.card().classes("mt-4 bg-slate-50 p-3"):
+            with ui.card().classes("mt-4 bg-slate-50 p-3").style("overflow: hidden;"):
                 ui.label("Recent Logs").classes("text-sm font-semibold")
                 log_loading_label = (
                     ui.label("Loading logs...")
@@ -594,33 +618,43 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                     ui.textarea("")
                     .props("readonly")
                     .classes(
-                        "w-full min-h-[220px] text-xs sm:text-sm font-mono bg-white"
+                        "w-full min-h-[220px] max-h-[260px] text-xs sm:text-sm font-mono bg-white overflow-y-auto"
                     )
                 )
-                with ui.row().classes("items-center gap-2 mt-3 flex-wrap"):
-                    log_refresh_button = ui.button("Refresh logs")
+                with ui.row().classes(
+                    "items-stretch gap-2 mt-3 flex-col sm:flex-row",
+                ):
+                    log_refresh_button = ui.button("Refresh logs").classes(
+                        "w-full sm:w-auto"
+                    )
                     log_refresh_button.on(
                         "click",
                         lambda _: asyncio.create_task(
                             _load_recent_logs(current_job_id or "")
                         ),
                     )
-                    live_button = ui.button("Live logs", on_click=_handle_live_button)
+                    live_button = ui.button(
+                        "Live logs", on_click=_handle_live_button
+                    ).classes("w-full sm:w-auto")
                     pause_button = ui.button(
                         "Pause/Disconnect",
                         on_click=lambda _: _stop_live_stream("Live logs paused"),
-                    )
+                    ).classes("w-full sm:w-auto")
                     pause_button.disabled = True
-                    sse_status_label = (
-                        ui.label("Live logs inactive")
-                        .classes("text-sm text-gray-500")
-                        .style("white-space: nowrap;")
+                    sse_status_label = ui.label("Live logs inactive").classes(
+                        "text-sm text-gray-500 break-words"
                     )
-            with ui.row().classes("items-center gap-2 mt-4 flex-wrap"):
-                abort_button = ui.button(
-                    "Abort job", on_click=_show_abort_confirmation
-                ).props("color=negative")
-                ui.button("Close", on_click=_handle_detail_close).props("flat")
+            with ui.row().classes(
+                "items-stretch gap-2 mt-4 flex-col sm:flex-row",
+            ):
+                abort_button = (
+                    ui.button("Abort job", on_click=_show_abort_confirmation)
+                    .props("color=negative")
+                    .classes("w-full sm:w-auto")
+                )
+                ui.button("Close", on_click=_handle_detail_close).props("flat").classes(
+                    "w-full sm:w-auto"
+                )
             abort_status_label = (
                 ui.label("").classes("text-sm text-orange-600 mt-1").visible(False)
             )
@@ -644,7 +678,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 pagination=0,
             )
 
-    detail_dialog.on("close", lambda _: _stop_live_stream("Live logs paused"))
+    detail_dialog.on("close", _handle_detail_dialog_closed)
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center justify-between gap-4"):
             ui.label("Jobs").classes("text-lg font-semibold")
@@ -656,53 +690,74 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         jobs_loading_label = (
             ui.label("Loading jobs...").classes("text-sm text-gray-500").visible(False)
         )
-        jobs_table = ui.table(
-            rows=[],
-            columns=[
-                {
-                    "name": "job_id",
-                    "label": "Job ID",
-                    "field": "job_id",
-                    "sortable": False,
-                },
-                {"name": "repo", "label": "Repo", "field": "repo", "sortable": False},
-                {
-                    "name": "branch",
-                    "label": "Branch",
-                    "field": "branch",
-                    "sortable": False,
-                },
-                {
-                    "name": "state",
-                    "label": "State",
-                    "field": "state",
-                    "sortable": False,
-                },
-                {"name": "time", "label": "Time", "field": "time", "sortable": False},
-                {
-                    "name": "heartbeat",
-                    "label": "Heartbeat / Stalled",
-                    "field": "heartbeat",
-                    "sortable": False,
-                },
-                {
-                    "name": "exit_code",
-                    "label": "Exit Code",
-                    "field": "exit_code",
-                    "sortable": False,
-                },
-            ],
-            row_key="job_id",
-            pagination=None,
-            selection="single",
-        )
+        with ui.div().classes("w-full overflow-x-auto mt-2"):
+            jobs_table = ui.table(
+                rows=[],
+                columns=[
+                    {
+                        "name": "job_id",
+                        "label": "Job ID",
+                        "field": "job_id",
+                        "sortable": False,
+                    },
+                    {
+                        "name": "repo",
+                        "label": "Repo",
+                        "field": "repo",
+                        "sortable": False,
+                    },
+                    {
+                        "name": "branch",
+                        "label": "Branch",
+                        "field": "branch",
+                        "sortable": False,
+                    },
+                    {
+                        "name": "state",
+                        "label": "State",
+                        "field": "state",
+                        "sortable": False,
+                    },
+                    {
+                        "name": "time",
+                        "label": "Time",
+                        "field": "time",
+                        "sortable": False,
+                    },
+                    {
+                        "name": "heartbeat",
+                        "label": "Heartbeat / Stalled",
+                        "field": "heartbeat",
+                        "sortable": False,
+                    },
+                    {
+                        "name": "exit_code",
+                        "label": "Exit Code",
+                        "field": "exit_code",
+                        "sortable": False,
+                    },
+                ],
+                row_key="job_id",
+                pagination=None,
+                selection="single",
+            ).classes("min-w-[660px]")
         jobs_table.on_select(_handle_job_selection)
         jobs_empty_label = (
             ui.label("No jobs yet. Check back later.")
             .classes("text-sm text-gray-500")
             .visible(False)
         )
+
+    def _stop_live_stream_when_hidden() -> None:
+        nonlocal detail_dialog_open, live_stream_task
+        if detail_dialog_open:
+            return
+        if live_stream_task is None:
+            return
+        _stop_live_stream("Live logs paused (dialog hidden)")
+
     ui.timer(10, _refresh_jobs, on_start=True)
+    ui.timer(5, _stop_live_stream_when_hidden)
 
 
 def _build_submit_panel(
@@ -721,7 +776,7 @@ def _build_submit_panel(
         ui.label(
             "Pick an inbox repo and branch before submitting prompts or uploads."
         ).classes("text-sm text-gray-500")
-        with ui.row().classes("items-end gap-4 flex-wrap mt-3"):
+        with ui.row().classes("items-end gap-3 mt-3 flex-col sm:flex-row"):
             repo_select = ui.select(
                 options=[],
                 label="Repo",
@@ -735,6 +790,7 @@ def _build_submit_panel(
                 disabled=True,
             ).classes("w-full sm:w-1/3")
             target_refresh_button = ui.button("Reload targets")
+        target_refresh_button.classes("w-full sm:w-auto self-start")
         target_status_label = ui.label("Loading inbox targets...").classes(
             "text-sm text-gray-500 mt-2"
         )
@@ -757,12 +813,15 @@ def _build_submit_panel(
         ).classes("w-full mt-2")
         compose_error_label = ui.label("").classes("text-sm text-red-600 mt-2")
         compose_error_label.visible = False
-        with ui.row().classes("items-center gap-2 mt-2") as compose_result_row:
+        with ui.row().classes(
+            "items-start gap-2 mt-2 flex-col sm:flex-row"
+        ) as compose_result_row:
             compose_result_label = ui.label("")
             compose_result_link = ui.link("View job detail", "#", new_tab=True)
+            compose_result_link.classes("break-words")
         compose_result_row.visible = False
         compose_result_link.visible = False
-        compose_submit_button = ui.button("Submit text")
+        compose_submit_button = ui.button("Submit text").classes("w-full sm:w-auto")
         compose_submit_button.props("color=primary")
         compose_submit_button.disabled = True
 
@@ -774,14 +833,15 @@ def _build_submit_panel(
         upload_control = ui.upload(multiple=True, auto_upload=False)
         upload_control.props["accept"] = ".md"
         selected_files_label = ui.label("No files selected").classes(
-            "text-sm text-gray-500 mt-2"
+            "text-sm text-gray-500 mt-2 break-words"
         )
         upload_error_label = ui.label("").classes("text-sm text-red-600 mt-2")
         upload_error_label.visible = False
         upload_results_markdown = ui.markdown("")
-        upload_results_markdown.classes("text-sm text-gray-600 mt-2")
+        upload_results_markdown.classes("text-sm text-gray-600 mt-2 break-words")
         upload_results_markdown.visible = False
-        upload_submit_button = ui.button("Submit files")
+        with ui.row().classes("items-stretch gap-2 mt-2 flex-col sm:flex-row"):
+            upload_submit_button = ui.button("Submit files").classes("w-full sm:w-auto")
         upload_submit_button.props("color=secondary")
         upload_submit_button.disabled = True
 
@@ -1040,17 +1100,17 @@ def _build_services_panel(
         "Refresh services",
         icon="refresh",
         on_click=lambda _: asyncio.create_task(_refresh_services()),
-    )
+    ).classes("w-full sm:w-auto")
     refresh_button.disabled = True
 
     connectivity_hint_label = ui.label("Awaiting connectivity...").classes(
-        "text-sm text-gray-500"
+        "text-sm text-gray-500 break-words"
     )
 
     watcher_error_label = ui.label("").classes("text-sm text-rose-600").visible(False)
     tree_error_label = ui.label("").classes("text-sm text-rose-600").visible(False)
 
-    with ui.row().classes("items-center gap-3 mt-2"):
+    with ui.row().classes("items-center gap-3 mt-2 flex-col sm:flex-row"):
         refresh_button
         connectivity_hint_label
 
@@ -1071,7 +1131,7 @@ def _build_services_panel(
             with ui.row().classes("items-center justify-between mt-2"):
                 ui.label("Status").classes("text-sm text-gray-500")
                 watcher_status_badge = ui.label("Loading...").classes(
-                    "px-3 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-700"
+                    "px-3 py-1 text-sm font-semibold rounded-full bg-amber-100 text-amber-700"
                 )
             watcher_status_detail = ui.label("Refreshing watcher state...").classes(
                 "text-sm text-gray-600 mt-1"
@@ -1091,7 +1151,7 @@ def _build_services_panel(
             with ui.row().classes("items-center justify-between mt-2"):
                 ui.label("Status").classes("text-sm text-gray-500")
                 tree_status_badge = ui.label("Loading...").classes(
-                    "px-3 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-700"
+                    "px-3 py-1 text-sm font-semibold rounded-full bg-amber-100 text-amber-700"
                 )
             tree_message_label = ui.label("Refreshing TreeBuilder coverage...").classes(
                 "text-sm text-gray-600 mt-1"
@@ -1104,7 +1164,7 @@ def _build_services_panel(
             )
             target_list_markdown = ui.markdown(
                 "Targets will appear after the first refresh."
-            ).classes("text-sm text-gray-600 mt-2")
+            ).classes("text-sm text-gray-600 mt-2 break-words")
             tree_error_label
 
     services_refresh_in_progress = False
