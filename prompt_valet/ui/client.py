@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import httpx
-from typing import Any, Dict, List, Sequence
+from typing import Any, AsyncIterator, Dict, List, Sequence
 
 
 @dataclass(frozen=True)
@@ -22,17 +22,29 @@ class UploadFilePayload:
 
 
 class PromptValetAPIClient:
-    def __init__(self, base_url: str, timeout_seconds: float = 5.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 5.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         trimmed = base_url.rstrip("/")
         if not trimmed:
             raise ValueError("API base URL must not be empty")
         self.base_url = trimmed
         self.timeout_seconds = timeout_seconds
+        self._transport = transport
+
+    def _httpx_client(self, timeout: httpx.Timeout) -> httpx.AsyncClient:
+        kwargs: dict[str, Any] = {"timeout": timeout}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        return httpx.AsyncClient(**kwargs)
 
     async def ping(self) -> HealthReport:
         timeout = httpx.Timeout(self.timeout_seconds)
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with self._httpx_client(timeout) as client:
                 response = await client.get(f"{self.base_url}/healthz")
                 response.raise_for_status()
                 payload = response.json()
@@ -57,7 +69,7 @@ class PromptValetAPIClient:
 
     async def list_jobs(self) -> List[Dict[str, Any]]:
         timeout = httpx.Timeout(self.timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with self._httpx_client(timeout) as client:
             response = await client.get(f"{self.base_url}/jobs")
             response.raise_for_status()
             payload = response.json()
@@ -68,7 +80,7 @@ class PromptValetAPIClient:
 
     async def get_job_detail(self, job_id: str) -> Dict[str, Any]:
         timeout = httpx.Timeout(self.timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with self._httpx_client(timeout) as client:
             response = await client.get(f"{self.base_url}/jobs/{job_id}")
             response.raise_for_status()
             payload = response.json()
@@ -78,7 +90,7 @@ class PromptValetAPIClient:
 
     async def list_targets(self) -> List[Dict[str, str | None]]:
         timeout = httpx.Timeout(self.timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with self._httpx_client(timeout) as client:
             response = await client.get(f"{self.base_url}/targets")
             response.raise_for_status()
             payload = response.json()
@@ -101,7 +113,7 @@ class PromptValetAPIClient:
         }
         if filename is not None:
             data["filename"] = filename
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with self._httpx_client(timeout) as client:
             response = await client.post(f"{self.base_url}/jobs", json=data)
             response.raise_for_status()
             payload = response.json()
@@ -122,7 +134,7 @@ class PromptValetAPIClient:
             multipart_files.append(
                 ("files", (upload.filename, upload.data, content_type)),
             )
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with self._httpx_client(timeout) as client:
             response = await client.post(
                 f"{self.base_url}/jobs/upload",
                 data={"repo": repo, "branch": branch},
@@ -134,3 +146,39 @@ class PromptValetAPIClient:
         if not isinstance(jobs, list):
             raise ValueError("invalid upload response")
         return jobs
+
+    async def abort_job(self, job_id: str) -> Dict[str, str]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        async with self._httpx_client(timeout) as client:
+            response = await client.post(f"{self.base_url}/jobs/{job_id}/abort")
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("invalid abort payload")
+        return payload
+
+    async def tail_job_log(self, job_id: str, lines: int | None = None) -> str:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        params: dict[str, Any] = {}
+        if lines is not None:
+            params["lines"] = lines
+        async with self._httpx_client(timeout) as client:
+            response = await client.get(
+                f"{self.base_url}/jobs/{job_id}/log",
+                params=params or None,
+            )
+            response.raise_for_status()
+            return response.text
+
+    async def stream_job_log(self, job_id: str) -> AsyncIterator[str]:
+        timeout = httpx.Timeout(None)
+        async with self._httpx_client(timeout) as client:
+            async with client.stream(
+                "GET", f"{self.base_url}/jobs/{job_id}/log/stream"
+            ) as response:
+                response.raise_for_status()
+                async for raw_line in response.aiter_lines():
+                    if not raw_line:
+                        continue
+                    if raw_line.startswith("data:"):
+                        yield raw_line[5:].lstrip()
