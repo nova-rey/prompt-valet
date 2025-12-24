@@ -67,16 +67,44 @@ class PromptValetAPIClient:
                 detail=f"invalid health payload: {exc}",
             )
 
-    async def list_jobs(self) -> List[Dict[str, Any]]:
+    async def list_jobs(
+        self,
+        state: str | None = None,
+        repo: str | None = None,
+        branch: str | None = None,
+        stalled: bool | None = None,
+        limit: int | None = None,
+    ) -> List[Dict[str, Any]]:
         timeout = httpx.Timeout(self.timeout_seconds)
         async with self._httpx_client(timeout) as client:
-            response = await client.get(f"{self.base_url}/jobs")
+            params: dict[str, str] = {}
+            if state is not None:
+                params["state"] = state
+            if repo is not None:
+                params["repo"] = repo
+            if branch is not None:
+                params["branch"] = branch
+            if stalled is not None:
+                params["stalled"] = "true" if stalled else "false"
+            if limit is not None:
+                params["limit"] = str(limit)
+            response = await client.get(f"{self.base_url}/jobs", params=params or None)
             response.raise_for_status()
             payload = response.json()
         jobs = payload.get("jobs")
         if not isinstance(jobs, list):
             raise ValueError("invalid jobs payload")
         return jobs
+
+    async def get_status(self) -> Dict[str, Any]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        async with self._httpx_client(timeout) as client:
+            response = await client.get(f"{self.base_url}/status")
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("invalid status payload")
+        return payload
 
     async def get_job_detail(self, job_id: str) -> Dict[str, Any]:
         timeout = httpx.Timeout(self.timeout_seconds)

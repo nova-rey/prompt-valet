@@ -61,3 +61,37 @@ def test_abort_job_posts_abort_endpoint() -> None:
     payload = asyncio.run(client.abort_job("job-xyz"))
     assert payload["job_id"] == "job-xyz"
     assert payload["previous_state"] == "running"
+
+
+def test_list_jobs_uses_query_parameters() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/jobs"
+        assert request.url.params["state"] == "running"
+        assert request.url.params["stalled"] == "true"
+        assert request.url.params["limit"] == "5"
+        return httpx.Response(200, json={"jobs": []})
+
+    transport = httpx.MockTransport(handler)
+    client = PromptValetAPIClient("http://example/api/v1", transport=transport)
+    asyncio.run(client.list_jobs(state="running", stalled=True, limit=5))
+
+
+def test_get_status_returns_dict_payload() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/status"
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "jobs": {"counts": {"running": 0}, "total": 0, "stalled_running": 0},
+                "config": {},
+                "targets": {"count": 0},
+                "roots": {"tree_builder_root_exists": True, "runs_root_exists": True},
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = PromptValetAPIClient("http://example/api/v1", transport=transport)
+
+    result = asyncio.run(client.get_status())
+    assert result["status"] == "ok"
