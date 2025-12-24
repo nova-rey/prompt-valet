@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from nicegui import ui
+from nicegui.events import MultiUploadEventArguments
 
-from prompt_valet.ui.client import PromptValetAPIClient
+from prompt_valet.ui.client import PromptValetAPIClient, UploadFilePayload
 from prompt_valet.ui.settings import UISettings
 
 TIMESTAMP_FIELDS = (
@@ -426,16 +428,327 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
     ui.timer(10, _refresh_jobs, on_start=True)
 
 
-def _build_submit_panel() -> None:
-    ui.markdown("### Submit placeholder")
-    ui.markdown(
-        "Describe how submission will look once connected. For now this tab warns that the UI just mirrors API functionality."
-    )
-    with ui.card().classes("mt-4 w-full sm:w-3/4 lg:w-1/2"):
-        ui.label("Job submission work will live here.").classes("font-medium")
+def _build_submit_panel(
+    settings: UISettings,
+    client: PromptValetAPIClient,
+    register_connectivity_listener: Callable[[Callable[[bool], None]], None],
+) -> None:
+    targets_by_repo: Dict[str, List[str]] = {}
+    selected_repo: str | None = None
+    selected_branch: str | None = None
+    selected_uploads: List[UploadFilePayload] = []
+    api_reachable = False
+
+    with ui.card().classes("w-full"):
+        ui.label("Target selection").classes("text-lg font-semibold")
         ui.label(
-            "Connects to `/api/v1/jobs` and `/api/v1/jobs/upload` in the future."
-        ).classes("text-sm text-gray-600")
+            "Pick an inbox repo and branch before submitting prompts or uploads."
+        ).classes("text-sm text-gray-500")
+        with ui.row().classes("items-end gap-4 flex-wrap mt-3"):
+            repo_select = ui.select(
+                options=[],
+                label="Repo",
+                placeholder="Select repository",
+                disabled=True,
+            ).classes("w-full sm:w-1/3")
+            branch_select = ui.select(
+                options=[],
+                label="Branch",
+                placeholder="Select branch",
+                disabled=True,
+            ).classes("w-full sm:w-1/3")
+            target_refresh_button = ui.button("Reload targets")
+        target_status_label = ui.label("Loading inbox targets...").classes(
+            "text-sm text-gray-500 mt-2"
+        )
+        target_error_label = ui.label("").classes("text-sm text-red-600")
+        target_error_label.visible = False
+
+    with ui.card().classes("mt-4 w-full lg:w-5/6"):
+        ui.label("Compose mode").classes("text-lg font-semibold")
+        ui.label(
+            "Write Markdown, optionally name the file, and let the API drop it into the inbox."
+        ).classes("text-sm text-gray-500 mb-2")
+        compose_textarea = ui.textarea(
+            placeholder="Enter your prompt in Markdown...",
+            value="",
+            label="Markdown prompt",
+        ).classes("w-full")
+        filename_input = ui.input(
+            label="Optional filename (e.g. greet.prompt.md)",
+            placeholder="Leave empty to let the API generate a name",
+        ).classes("w-full mt-2")
+        compose_error_label = ui.label("").classes("text-sm text-red-600 mt-2")
+        compose_error_label.visible = False
+        with ui.row().classes("items-center gap-2 mt-2") as compose_result_row:
+            compose_result_label = ui.label("")
+            compose_result_link = ui.link("View job detail", "#", new_tab=True)
+        compose_result_row.visible = False
+        compose_result_link.visible = False
+        compose_submit_button = ui.button("Submit text")
+        compose_submit_button.props("color=primary")
+        compose_submit_button.disabled = True
+
+    with ui.card().classes("mt-4 w-full lg:w-5/6"):
+        ui.label("Upload mode").classes("text-lg font-semibold")
+        ui.label(
+            "Upload one or more `.md` files; each is forwarded unchanged to `/api/v1/jobs/upload`."
+        ).classes("text-sm text-gray-500 mb-2")
+        upload_control = ui.upload(multiple=True, auto_upload=False)
+        upload_control.props["accept"] = ".md"
+        selected_files_label = ui.label("No files selected").classes(
+            "text-sm text-gray-500 mt-2"
+        )
+        upload_error_label = ui.label("").classes("text-sm text-red-600 mt-2")
+        upload_error_label.visible = False
+        upload_results_markdown = ui.markdown("")
+        upload_results_markdown.classes("text-sm text-gray-600 mt-2")
+        upload_results_markdown.visible = False
+        upload_submit_button = ui.button("Submit files")
+        upload_submit_button.props("color=secondary")
+        upload_submit_button.disabled = True
+
+    def _update_compose_button_enabled() -> None:
+        ready_text = bool(compose_textarea.value and compose_textarea.value.strip())
+        ready = bool(api_reachable and selected_repo and selected_branch and ready_text)
+        compose_submit_button.disabled = not ready
+
+    def _update_selected_files_label() -> None:
+        count = len(selected_uploads)
+        if count:
+            selected_files_label.set_text(f"{count} file(s) selected")
+        else:
+            selected_files_label.set_text("No files selected")
+
+    def _update_upload_button_enabled() -> None:
+        ready = bool(
+            api_reachable and selected_repo and selected_branch and selected_uploads
+        )
+        upload_submit_button.disabled = not ready
+
+    async def _refresh_targets() -> None:
+        nonlocal selected_repo, selected_branch, targets_by_repo
+        target_status_label.set_text("Loading inbox targets...")
+        target_error_label.visible = False
+        repo_select.disabled = True
+        branch_select.disabled = True
+        try:
+            discovered = await client.list_targets()
+        except Exception as exc:  # noqa: BLE001
+            targets_by_repo.clear()
+            repo_select.options = []
+            branch_select.options = []
+            selected_repo = None
+            selected_branch = None
+            target_status_label.set_text("Unable to load targets")
+            target_error_label.set_text(f"Failed to load targets: {exc}")
+            target_error_label.visible = True
+            _update_compose_button_enabled()
+            _update_upload_button_enabled()
+            return
+
+        if not discovered:
+            targets_by_repo.clear()
+            repo_select.options = []
+            branch_select.options = []
+            selected_repo = None
+            selected_branch = None
+            branch_select.disabled = True
+            repo_select.disabled = True
+            target_status_label.set_text("No inbox targets discovered.")
+            target_error_label.visible = False
+            _update_compose_button_enabled()
+            _update_upload_button_enabled()
+            return
+
+        new_map: Dict[str, List[str]] = {}
+        for target in discovered:
+            display_repo = target.get("full_repo") or target.get("repo") or ""
+            branch = target.get("branch")
+            if not display_repo or not branch:
+                continue
+            new_map.setdefault(display_repo, []).append(branch)
+
+        for repo_key, branches in new_map.items():
+            new_map[repo_key] = sorted(set(branches))
+
+        targets_by_repo.clear()
+        targets_by_repo.update(new_map)
+        repo_options = sorted(targets_by_repo.keys())
+        repo_select.options = repo_options
+        repo_select.disabled = not bool(repo_options)
+        if repo_options:
+            selected_repo = repo_options[0]
+            repo_select.value = selected_repo
+            branch_options = targets_by_repo[selected_repo]
+            branch_select.options = branch_options
+            branch_select.disabled = not bool(branch_options)
+            if branch_options:
+                selected_branch = branch_options[0]
+                branch_select.value = selected_branch
+            else:
+                selected_branch = None
+                branch_select.value = None
+        else:
+            selected_repo = None
+            selected_branch = None
+            branch_select.options = []
+            branch_select.value = None
+            branch_select.disabled = True
+
+        target_status_label.set_text(f"{len(repo_options)} inbox repo(s) available")
+        _update_compose_button_enabled()
+        _update_upload_button_enabled()
+
+    def _on_repo_change(_: Any) -> None:
+        nonlocal selected_repo, selected_branch
+        repo_value = repo_select.value or None
+        selected_repo = repo_value
+        if repo_value:
+            branches = targets_by_repo.get(repo_value, [])
+            branch_select.options = branches
+            branch_select.disabled = not bool(branches)
+            if branches:
+                selected_branch = branches[0]
+                branch_select.value = selected_branch
+            else:
+                selected_branch = None
+                branch_select.value = None
+        else:
+            branch_select.options = []
+            branch_select.value = None
+            branch_select.disabled = True
+            selected_branch = None
+        _update_compose_button_enabled()
+        _update_upload_button_enabled()
+
+    def _on_branch_change(_: Any) -> None:
+        nonlocal selected_branch
+        selected_branch = branch_select.value or None
+        _update_compose_button_enabled()
+        _update_upload_button_enabled()
+
+    async def _handle_file_selection(event: MultiUploadEventArguments) -> None:
+        nonlocal selected_uploads
+        selected_uploads.clear()
+        upload_error_label.visible = False
+        for file in event.files:
+            name = file.name
+            if not name or not name.lower().endswith(".md"):
+                upload_error_label.set_text("Only '.md' files are accepted.")
+                upload_error_label.visible = True
+                continue
+            try:
+                data = await file.read()
+            except Exception as exc:  # noqa: BLE001
+                upload_error_label.set_text(f"Failed to read {name}: {exc}")
+                upload_error_label.visible = True
+                continue
+            selected_uploads.append(
+                UploadFilePayload(
+                    filename=name,
+                    data=data,
+                    content_type=getattr(file, "content_type", None),
+                )
+            )
+        _update_selected_files_label()
+        _update_upload_button_enabled()
+
+    async def _submit_composed() -> None:
+        compose_error_label.visible = False
+        compose_result_row.visible = False
+        compose_submit_button.disabled = True
+        if not selected_repo or not selected_branch:
+            _update_compose_button_enabled()
+            return
+        filename_value = (
+            filename_input.value.strip()
+            if filename_input.value and filename_input.value.strip()
+            else None
+        )
+        try:
+            payload = await client.submit_job(
+                selected_repo or "",
+                selected_branch or "",
+                compose_textarea.value or "",
+                filename_value,
+            )
+        except Exception as exc:  # noqa: BLE001
+            compose_error_label.set_text(f"Submission failed: {exc}")
+            compose_error_label.visible = True
+        else:
+            job_id = payload.get("job_id") or ""
+            compose_result_label.set_text(f"Job ID: {job_id}")
+            if job_id:
+                compose_result_link.props["href"] = (
+                    f"{settings.api_base_url}/jobs/{job_id}"
+                )
+                compose_result_link.visible = True
+            else:
+                compose_result_link.visible = False
+            compose_result_row.visible = True
+        finally:
+            _update_compose_button_enabled()
+
+    async def _submit_upload() -> None:
+        upload_error_label.visible = False
+        upload_results_markdown.visible = False
+        upload_submit_button.disabled = True
+        if not selected_repo or not selected_branch or not selected_uploads:
+            _update_upload_button_enabled()
+            return
+        try:
+            jobs = await client.upload_jobs(
+                selected_repo or "",
+                selected_branch or "",
+                selected_uploads,
+            )
+        except Exception as exc:  # noqa: BLE001
+            upload_error_label.set_text(f"Upload failed: {exc}")
+            upload_error_label.visible = True
+        else:
+            if jobs:
+                lines = [
+                    "| Filename | Job ID | Details |",
+                    "| --- | --- | --- |",
+                ]
+                for payload, job in zip(selected_uploads, jobs):
+                    job_id = job.get("job_id") or "unknown"
+                    view_url = f"{settings.api_base_url}/jobs/{job_id}"
+                    lines.append(
+                        f"| {payload.filename} | {job_id} | [View job]({view_url}) |"
+                    )
+                upload_results_markdown.set_text(
+                    "### Upload results\n" + "\n".join(lines)
+                )
+                upload_results_markdown.visible = True
+            else:
+                upload_results_markdown.set_text(
+                    "Upload succeeded with no jobs returned."
+                )
+                upload_results_markdown.visible = True
+        finally:
+            selected_uploads.clear()
+            upload_control.reset()
+            _update_selected_files_label()
+            _update_upload_button_enabled()
+
+    compose_textarea.on_change(lambda _: _update_compose_button_enabled())
+    repo_select.on_change(_on_repo_change)
+    branch_select.on_change(_on_branch_change)
+    upload_control.on_multi_upload(_handle_file_selection)
+    compose_submit_button.on("click", lambda _: asyncio.create_task(_submit_composed()))
+    upload_submit_button.on("click", lambda _: asyncio.create_task(_submit_upload()))
+    target_refresh_button.on("click", lambda _: asyncio.create_task(_refresh_targets()))
+
+    def _set_connectivity(reachable: bool) -> None:
+        nonlocal api_reachable
+        api_reachable = reachable
+        _update_compose_button_enabled()
+        _update_upload_button_enabled()
+
+    register_connectivity_listener(_set_connectivity)
+    asyncio.create_task(_refresh_targets())
 
 
 def _build_services_panel() -> None:
@@ -455,6 +768,12 @@ def create_ui_app(settings: UISettings | None = None) -> None:
     client = PromptValetAPIClient(
         settings.api_base_url, timeout_seconds=settings.api_timeout_seconds
     )
+    connectivity_listeners: List[Callable[[bool], None]] = []
+    api_connectivity_reachable = False
+
+    def register_connectivity_listener(listener: Callable[[bool], None]) -> None:
+        connectivity_listeners.append(listener)
+        listener(api_connectivity_reachable)
 
     with ui.header().classes("justify-between px-6"):
         ui.label("Prompt Valet UI").classes("text-lg font-semibold")
@@ -465,7 +784,11 @@ def create_ui_app(settings: UISettings | None = None) -> None:
             )
 
     async def refresh_connectivity() -> None:
+        nonlocal api_connectivity_reachable
         report = await client.ping()
+        api_connectivity_reachable = report.reachable
+        for listener in connectivity_listeners:
+            listener(api_connectivity_reachable)
         if report.reachable:
             color = "text-emerald-500"
             status_label.set_text(
@@ -491,6 +814,6 @@ def create_ui_app(settings: UISettings | None = None) -> None:
         with ui.tab_panel("Dashboard"):
             _build_dashboard_panel(settings, client)
         with ui.tab_panel("Submit"):
-            _build_submit_panel()
+            _build_submit_panel(settings, client, register_connectivity_listener)
         with ui.tab_panel("Services"):
             _build_services_panel()

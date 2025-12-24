@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import httpx
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,13 @@ class HealthReport:
     reachable: bool
     version: str | None = None
     detail: str | None = None
+
+
+@dataclass(frozen=True)
+class UploadFilePayload:
+    filename: str
+    data: bytes
+    content_type: str | None = None
 
 
 class PromptValetAPIClient:
@@ -68,3 +75,62 @@ class PromptValetAPIClient:
         if not isinstance(payload, dict):
             raise ValueError("invalid job detail payload")
         return payload
+
+    async def list_targets(self) -> List[Dict[str, str | None]]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{self.base_url}/targets")
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, list):
+            raise ValueError("invalid targets payload")
+        return payload
+
+    async def submit_job(
+        self,
+        repo: str,
+        branch: str,
+        markdown_text: str,
+        filename: str | None = None,
+    ) -> Dict[str, str]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        data = {
+            "repo": repo,
+            "branch": branch,
+            "markdown_text": markdown_text,
+        }
+        if filename is not None:
+            data["filename"] = filename
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(f"{self.base_url}/jobs", json=data)
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("invalid submit job payload")
+        return payload
+
+    async def upload_jobs(
+        self,
+        repo: str,
+        branch: str,
+        files: Sequence[UploadFilePayload],
+    ) -> List[Dict[str, str]]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        multipart_files: list[tuple[str, tuple[str, bytes, str]]] = []
+        for upload in files:
+            content_type = upload.content_type or "text/markdown"
+            multipart_files.append(
+                ("files", (upload.filename, upload.data, content_type)),
+            )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/jobs/upload",
+                data={"repo": repo, "branch": branch},
+                files=multipart_files,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        jobs = payload.get("jobs")
+        if not isinstance(jobs, list):
+            raise ValueError("invalid upload response")
+        return jobs
