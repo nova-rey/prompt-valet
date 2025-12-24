@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import httpx
+from typing import Any, Dict, List
 
 
 @dataclass(frozen=True)
@@ -46,3 +47,24 @@ class PromptValetAPIClient:
                 reachable=False,
                 detail=f"invalid health payload: {exc}",
             )
+
+    async def list_jobs(self) -> List[Dict[str, Any]]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{self.base_url}/jobs")
+            response.raise_for_status()
+            payload = response.json()
+        jobs = payload.get("jobs")
+        if not isinstance(jobs, list):
+            raise ValueError("invalid jobs payload")
+        return jobs
+
+    async def get_job_detail(self, job_id: str) -> Dict[str, Any]:
+        timeout = httpx.Timeout(self.timeout_seconds)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(f"{self.base_url}/jobs/{job_id}")
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("invalid job detail payload")
+        return payload
