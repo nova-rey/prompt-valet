@@ -32,6 +32,7 @@ _STATE_BADGE_STYLES: Dict[str, str] = {
 }
 
 TERMINAL_STATES = {"succeeded", "failed", "aborted"}
+_SERVICE_TARGET_PREVIEW = 4
 
 
 def _style_card(title: str, body: str) -> None:
@@ -1027,16 +1028,241 @@ def _build_submit_panel(
     asyncio.create_task(_refresh_targets())
 
 
-def _build_services_panel() -> None:
+def _build_services_panel(
+    client: PromptValetAPIClient, register_connectivity_listener: Callable[[bool], None]
+) -> None:
     ui.markdown("### Services overview")
     ui.markdown(
-        "Reserved for service health cards, rollout actions, or configuration helpers once they are defined."
+        "Watcher and TreeBuilder visibility is derived from the existing `/status`, `/jobs`, and `/targets` APIs."
     )
-    with ui.card().classes("mt-4 w-full lg:w-2/3"):
-        ui.label("Service wiring").classes("font-medium")
-        ui.label(
-            "This panel only displays static text until more endpoints are exposed."
-        ).classes("text-sm text-gray-600")
+
+    refresh_button = ui.button(
+        "Refresh services",
+        icon="refresh",
+        on_click=lambda _: asyncio.create_task(_refresh_services()),
+    )
+    refresh_button.disabled = True
+
+    connectivity_hint_label = ui.label("Awaiting connectivity...").classes(
+        "text-sm text-gray-500"
+    )
+
+    watcher_error_label = ui.label("").classes("text-sm text-rose-600").visible(False)
+    tree_error_label = ui.label("").classes("text-sm text-rose-600").visible(False)
+
+    with ui.row().classes("items-center gap-3 mt-2"):
+        refresh_button
+        connectivity_hint_label
+
+    watcher_status_badge: Any
+    tree_status_badge: Any
+    watcher_status_detail: Any
+    watcher_heartbeat_label: Any
+    watcher_message_label: Any
+    watcher_detail_label: Any
+    tree_message_label: Any
+    tree_detail_label: Any
+    tree_target_count_label: Any
+    target_list_markdown: Any
+
+    with ui.row().classes("flex flex-wrap gap-4 mt-4"):
+        with ui.card().classes("w-full lg:w-1/2 p-4"):
+            ui.label("Watcher").classes("text-base font-semibold")
+            with ui.row().classes("items-center justify-between mt-2"):
+                ui.label("Status").classes("text-sm text-gray-500")
+                watcher_status_badge = ui.label("Loading...").classes(
+                    "px-3 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-700"
+                )
+            watcher_status_detail = ui.label("Refreshing watcher state...").classes(
+                "text-sm text-gray-600 mt-1"
+            )
+            watcher_heartbeat_label = ui.label("Last heartbeat: —").classes(
+                "text-sm text-gray-500 mt-1"
+            )
+            watcher_message_label = ui.label("Pending watcher data.").classes(
+                "text-sm text-gray-600 mt-1"
+            )
+            watcher_detail_label = ui.label("Runs root: —").classes(
+                "text-sm text-gray-500 mt-2"
+            )
+            watcher_error_label
+        with ui.card().classes("w-full lg:w-1/2 p-4"):
+            ui.label("TreeBuilder").classes("text-base font-semibold")
+            with ui.row().classes("items-center justify-between mt-2"):
+                ui.label("Status").classes("text-sm text-gray-500")
+                tree_status_badge = ui.label("Loading...").classes(
+                    "px-3 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-700"
+                )
+            tree_message_label = ui.label("Refreshing TreeBuilder coverage...").classes(
+                "text-sm text-gray-600 mt-1"
+            )
+            tree_detail_label = ui.label("Inbox root: —").classes(
+                "text-sm text-gray-500 mt-1"
+            )
+            tree_target_count_label = ui.label("Targets: —").classes(
+                "text-sm text-gray-500 mt-1"
+            )
+            target_list_markdown = ui.markdown(
+                "Targets will appear after the first refresh."
+            ).classes("text-sm text-gray-600 mt-2")
+            tree_error_label
+
+    services_refresh_in_progress = False
+    api_reachable = False
+
+    def _set_badge(label: Any, state: str, stalled: bool) -> None:
+        text, classes = _format_state_badge(state, stalled)
+        label.set_text(text)
+        label.set_classes(f"px-3 py-1 text-xs font-semibold rounded-full {classes}")
+
+    def _target_display(target: dict[str, str | None]) -> str:
+        repo = target.get("full_repo") or target.get("repo") or "unknown"
+        branch = target.get("branch") or "—"
+        return f"{repo}:{branch}"
+
+    def _update_watcher_card(
+        status_payload: dict[str, Any],
+        running_job: dict[str, Any] | None,
+        last_job: dict[str, Any] | None,
+    ) -> None:
+        jobs_section = status_payload.get("jobs") or {}
+        counts = jobs_section.get("counts") or {}
+        running_total = int(counts.get("running") or 0)
+        stalled_running = int(jobs_section.get("stalled_running") or 0)
+        total_runs = int(jobs_section.get("total") or 0)
+        runs_root_exists = status_payload.get("roots", {}).get(
+            "runs_root_exists", False
+        )
+        detail_state = running_job or last_job
+        detail_state_value = detail_state.get("state") if detail_state else None
+        state_value = _normalize_state(detail_state_value)
+        _set_badge(
+            watcher_status_badge,
+            state_value,
+            stalled_running > 0 or bool((running_job or {}).get("stalled")),
+        )
+        status_text = detail_state_value or status_payload.get("status", "ok")
+        watcher_status_detail.set_text(status_text.capitalize())
+        heartbeat_value = (running_job or last_job) and (running_job or last_job).get(
+            "heartbeat_at"
+        )
+        heartbeat_label = _format_timestamp_label("Last heartbeat", heartbeat_value)
+        watcher_heartbeat_label.set_text(heartbeat_label or "Last heartbeat: —")
+        if not runs_root_exists:
+            watcher_message_label.set_text(
+                "Runs root missing; watcher cannot persist metadata."
+            )
+        elif stalled_running:
+            watcher_message_label.set_text(f"{stalled_running} stalled run(s)")
+        elif running_total:
+            watcher_message_label.set_text(f"{running_total} running run(s)")
+        elif total_runs:
+            watcher_message_label.set_text("No active runs right now.")
+        else:
+            watcher_message_label.set_text("No runs recorded yet.")
+        runs_root = status_payload.get("config", {}).get("runs_root") or "unknown"
+        watcher_detail_label.set_text(f"Runs root: {runs_root}")
+
+    def _update_tree_card(
+        status_payload: dict[str, Any], targets: list[dict[str, str | None]]
+    ) -> None:
+        roots = status_payload.get("roots") or {}
+        config = status_payload.get("config") or {}
+        summary = status_payload.get("targets") or {}
+        root_exists = bool(roots.get("tree_builder_root_exists"))
+        target_count = int(summary.get("count") or len(targets))
+        _set_badge(tree_status_badge, "running" if root_exists else "unknown", False)
+        if root_exists:
+            tree_message_label.set_text(
+                f"{target_count} target(s) discovered"
+                if target_count
+                else "Root exists but no targets discovered yet."
+            )
+        else:
+            tree_message_label.set_text(
+                "Configured inbox root is missing; TreeBuilder cannot sync."
+            )
+        tree_detail_label.set_text(
+            f"Inbox root: {config.get('tree_builder_root') or 'unknown'}"
+        )
+        tree_target_count_label.set_text(f"Targets: {target_count}")
+        if targets:
+            preview = targets[:_SERVICE_TARGET_PREVIEW]
+            list_text = "\n".join(f"- {_target_display(target)}" for target in preview)
+            target_list_markdown.set_text(list_text)
+        else:
+            target_list_markdown.set_text("No inbox targets available yet.")
+
+    async def _refresh_services() -> None:
+        nonlocal services_refresh_in_progress
+        if services_refresh_in_progress:
+            return
+        services_refresh_in_progress = True
+        refresh_button.disabled = True
+        connectivity_hint_label.set_text("Refreshing services…")
+        watcher_error_label.visible = False
+        tree_error_label.visible = False
+        try:
+            status_payload = await client.get_status()
+            running_job: dict[str, Any] | None = None
+            last_job: dict[str, Any] | None = None
+            job_error: str | None = None
+            try:
+                running_jobs = await client.list_jobs(state="running", limit=1)
+                if running_jobs:
+                    running_job = running_jobs[0]
+                    last_job = running_job
+                else:
+                    fallback_jobs = await client.list_jobs(limit=1)
+                    if fallback_jobs:
+                        last_job = fallback_jobs[0]
+            except Exception as exc:  # noqa: BLE001
+                job_error = f"Watcher runs unavailable: {exc}"
+            _update_watcher_card(status_payload, running_job, last_job)
+            watcher_error_label.visible = bool(job_error)
+            if job_error:
+                watcher_error_label.set_text(job_error)
+            targets: list[dict[str, str | None]] = []
+            target_error: str | None = None
+            try:
+                targets = await client.list_targets()
+            except Exception as exc:  # noqa: BLE001
+                target_error = f"Failed to load targets: {exc}"
+            _update_tree_card(status_payload, targets)
+            tree_error_label.visible = bool(target_error)
+            if target_error:
+                tree_error_label.set_text(target_error)
+        except Exception as exc:  # noqa: BLE001
+            error_text = f"Failed to fetch status: {exc}"
+            watcher_error_label.set_text(error_text)
+            watcher_error_label.visible = True
+            tree_error_label.set_text(error_text)
+            tree_error_label.visible = True
+        finally:
+            services_refresh_in_progress = False
+            refresh_button.disabled = not api_reachable
+            if api_reachable:
+                now_label = _format_timestamp_label(
+                    "Last refresh",
+                    datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+                )
+                if now_label:
+                    connectivity_hint_label.set_text(now_label)
+
+    def _on_connectivity_change(reachable: bool) -> None:
+        nonlocal api_reachable
+        api_reachable = reachable
+        refresh_button.disabled = services_refresh_in_progress or not api_reachable
+        if reachable:
+            connectivity_hint_label.set_text("API reachable")
+            connectivity_hint_label.set_classes("text-sm text-emerald-600")
+        else:
+            connectivity_hint_label.set_text("API unreachable")
+            connectivity_hint_label.set_classes("text-sm text-rose-600")
+
+    register_connectivity_listener(_on_connectivity_change)
+    refresh_button.on("click", lambda _: asyncio.create_task(_refresh_services()))
+    asyncio.create_task(_refresh_services())
 
 
 def create_ui_app(settings: UISettings | None = None) -> None:
@@ -1092,4 +1318,4 @@ def create_ui_app(settings: UISettings | None = None) -> None:
         with ui.tab_panel("Submit"):
             _build_submit_panel(settings, client, register_connectivity_listener)
         with ui.tab_panel("Services"):
-            _build_services_panel()
+            _build_services_panel(client, register_connectivity_listener)
