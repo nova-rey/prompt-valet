@@ -7,3 +7,4 @@
 - P1·C5 – Added log tail + stream endpoints and abort controls that mirror runs/<job_id> artifacts with the filesystem handshake.
 - P1·C6 – Added API hardening artifacts (service unit, env template, operator + acceptance docs) while keeping runtime behavior unchanged.
 - P2·C1 – NiceGUI UI service skeleton + health wiring, with the new CLI entrypoint, API client wrapper, and header connectivity indicator against `/api/v1/healthz`.
+- P2·C2 – Jobs dashboard wired to `/api/v1/jobs` and detail panel via `/api/v1/jobs/{job_id}`, surfacing read-only metadata, heartbeat/stall indicators, and placeholder links for later actions.
