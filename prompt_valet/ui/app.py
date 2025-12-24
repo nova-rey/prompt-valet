@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -193,6 +194,23 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
     jobs_error_label: Optional[Any] = None
     jobs_loading_label: Optional[Any] = None
     jobs_empty_label: Optional[Any] = None
+    log_textarea: Optional[Any] = None
+    log_refresh_button: Optional[Any] = None
+    log_loading_label: Optional[Any] = None
+    log_error_label: Optional[Any] = None
+    sse_status_label: Optional[Any] = None
+    live_button: Optional[Any] = None
+    pause_button: Optional[Any] = None
+    abort_button: Optional[Any] = None
+    abort_status_label: Optional[Any] = None
+    log_lines: deque[str] = deque(maxlen=600)
+    current_job_id: str | None = None
+    current_job_state_lower: str | None = None
+    live_stream_task: Optional[asyncio.Task] = None
+    live_stream_stop: Optional[asyncio.Event] = None
+    live_requested = False
+    log_refresh_in_progress = False
+    abort_in_progress = False
 
     def _update_jobs_table() -> None:
         if jobs_table is None:
@@ -235,7 +253,214 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             sort_button.set_text(label)
         _update_jobs_table()
 
+    def _render_log_buffer() -> None:
+        if log_textarea is None:
+            return
+        log_textarea.set_value("\n".join(log_lines))
+
+    def _set_logs_from_text(text: str) -> None:
+        log_lines.clear()
+        log_lines.extend(text.splitlines())
+        _render_log_buffer()
+
+    def _append_log_line(line: str) -> None:
+        log_lines.append(line)
+        _render_log_buffer()
+
+    def _set_sse_status(text: str) -> None:
+        if sse_status_label is not None:
+            sse_status_label.set_text(text)
+
+    def _update_abort_button_state(state: str | None) -> None:
+        if abort_button is None:
+            return
+        abort_button.disabled = state != "running"
+
+    def _stop_live_stream(message: str | None = None) -> None:
+        nonlocal live_requested, live_stream_task, live_stream_stop
+        live_requested = False
+        if live_stream_stop is not None:
+            live_stream_stop.set()
+        if live_stream_task is not None:
+            live_stream_task.cancel()
+        live_stream_task = None
+        live_stream_stop = None
+        if live_button is not None:
+            live_button.set_text("Live logs")
+        if pause_button is not None:
+            pause_button.disabled = True
+        _set_sse_status(message or "Live logs inactive")
+
+    def _start_live_stream(job_id: str) -> None:
+        nonlocal live_requested, live_stream_task, live_stream_stop
+        if live_requested or not job_id:
+            return
+        live_requested = True
+        if pause_button is not None:
+            pause_button.disabled = False
+        if live_button is not None:
+            live_button.set_text("Live logs (stop)")
+        _set_sse_status("Connecting to live logs…")
+        stop_event = asyncio.Event()
+        live_stream_stop = stop_event
+        live_stream_task = asyncio.create_task(
+            _run_live_stream(job_id, stop_event),
+        )
+
+    def _handle_live_button(_: Any) -> None:
+        if live_requested:
+            _stop_live_stream("Live logs paused")
+            return
+        if not current_job_id:
+            _set_sse_status("Select a job to stream logs.")
+            return
+        _start_live_stream(current_job_id)
+
+    async def _run_live_stream(job_id: str, stop_event: asyncio.Event) -> None:
+        nonlocal live_requested, live_stream_task, live_stream_stop
+        backoff = 0.5
+        final_status = "Live logs inactive"
+        try:
+            while live_requested and not stop_event.is_set():
+                try:
+                    async for line in client.stream_job_log(job_id):
+                        if stop_event.is_set():
+                            final_status = "Live logs paused"
+                            return
+                        _append_log_line(line)
+                        _set_sse_status("Live stream active")
+                    final_status = "Live stream ended (job terminal)"
+                    return
+                except asyncio.CancelledError:
+                    final_status = "Live logs paused"
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    final_status = f"Reconnecting live logs in {backoff:.1f}s ({exc})"
+                    _set_sse_status(final_status)
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 10.0)
+            final_status = "Live logs inactive"
+        finally:
+            live_requested = False
+            live_stream_task = None
+            live_stream_stop = None
+            if live_button is not None:
+                live_button.set_text("Live logs")
+            if pause_button is not None:
+                pause_button.disabled = True
+            _set_sse_status(final_status)
+
+    async def _load_recent_logs(job_id: str) -> None:
+        nonlocal log_refresh_in_progress
+        if not job_id or log_refresh_in_progress:
+            return
+        log_refresh_in_progress = True
+        if log_refresh_button is not None:
+            log_refresh_button.disabled = True
+        if log_loading_label is not None:
+            log_loading_label.visible = True
+        if log_error_label is not None:
+            log_error_label.visible = False
+        try:
+            text = await client.tail_job_log(job_id)
+        except Exception as exc:  # noqa: BLE001
+            if log_error_label is not None:
+                log_error_label.set_text(f"Failed to load logs: {exc}")
+                log_error_label.visible = True
+        else:
+            _set_logs_from_text(text)
+        finally:
+            log_refresh_in_progress = False
+            if log_refresh_button is not None:
+                log_refresh_button.disabled = False
+            if log_loading_label is not None:
+                log_loading_label.visible = False
+
+    async def _refresh_current_job_detail() -> None:
+        if not current_job_id:
+            return
+        try:
+            job = await client.get_job_detail(current_job_id)
+        except Exception as exc:  # noqa: BLE001
+            if detail_error_label is not None:
+                detail_error_label.set_text(f"Failed to refresh job detail: {exc}")
+                detail_error_label.visible = True
+        else:
+            _render_job_detail(job)
+
+    async def _execute_abort(job_id: str) -> None:
+        nonlocal abort_in_progress
+        if abort_in_progress:
+            return
+        abort_in_progress = True
+        if abort_button is not None:
+            abort_button.disabled = True
+        try:
+            payload = await client.abort_job(job_id)
+        except Exception as exc:  # noqa: BLE001
+            if abort_status_label is not None:
+                abort_status_label.set_text(f"Abort failed: {exc}")
+                abort_status_label.set_classes("text-sm text-red-600")
+                abort_status_label.visible = True
+        else:
+            if abort_status_label is not None:
+                abort_status_label.set_text(
+                    f"Abort requested at {payload.get('abort_requested_at', 'unknown')}"
+                )
+                abort_status_label.set_classes("text-sm text-amber-600")
+                abort_status_label.visible = True
+            await _refresh_current_job_detail()
+        finally:
+            abort_in_progress = False
+            _update_abort_button_state(current_job_state_lower)
+
+    def _show_abort_confirmation(_: Any) -> None:
+        if not current_job_id:
+            return
+        selected_job_id = current_job_id
+        confirm_dialog = ui.dialog()
+        with confirm_dialog:
+            ui.label(f"Abort job {selected_job_id}?").classes("font-semibold")
+            ui.label("Type ABORT to confirm.").classes("text-sm text-gray-600")
+            confirmation_input = ui.input(label="Confirmation text").props(
+                "placeholder=ABORT"
+            )
+            confirmation_error = (
+                ui.label("").classes("text-sm text-red-600").visible(False)
+            )
+            with ui.row().classes("gap-2 mt-2"):
+                confirm_button = ui.button("Confirm abort").props("color=negative")
+                ui.button("Cancel", on_click=confirm_dialog.close).props("flat")
+
+            def _on_confirm(_: Any) -> None:
+                if (confirmation_input.value or "").strip() != "ABORT":
+                    confirmation_error.set_text("Please type ABORT to confirm.")
+                    confirmation_error.visible = True
+                    return
+                confirmation_error.visible = False
+                confirm_dialog.close()
+                asyncio.create_task(_execute_abort(selected_job_id))
+
+            confirm_button.on("click", _on_confirm)
+        confirm_dialog.open()
+
+    def _prepare_for_job(job_id: str) -> None:
+        nonlocal current_job_id, log_lines, current_job_state_lower
+        _stop_live_stream()
+        current_job_id = job_id
+        current_job_state_lower = None
+        log_lines.clear()
+        _render_log_buffer()
+        if log_error_label is not None:
+            log_error_label.visible = False
+        if abort_status_label is not None:
+            abort_status_label.visible = False
+        if log_refresh_button is not None:
+            log_refresh_button.disabled = False
+        _set_sse_status("Live logs inactive")
+
     def _render_job_detail(job: Dict[str, Any]) -> None:
+        nonlocal current_job_state_lower
         if (
             detail_title is None
             or detail_subtitle is None
@@ -249,6 +474,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         detail_subtitle.set_text(f"{repo_label} · {branch_label}")
         state_norm = _normalize_state(job.get("state"))
         stalled_flag = bool(job.get("stalled"))
+        current_job_state_lower = state_norm
         badge_text, badge_classes = _format_state_badge(state_norm, stalled_flag)
         detail_state_badge.set_text(badge_text)
         detail_state_badge.set_classes(
@@ -291,10 +517,13 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                     }
                 )
             detail_metadata_table.rows = rows
+        _update_abort_button_state(current_job_state_lower)
 
     async def _show_job_detail(job_id: str) -> None:
         if detail_dialog is None:
             return
+        _prepare_for_job(job_id)
+        _update_abort_button_state(None)
         if detail_error_label is not None:
             detail_error_label.visible = False
         if detail_loading_label is not None:
@@ -308,6 +537,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 detail_error_label.visible = True
         else:
             _render_job_detail(job)
+            asyncio.create_task(_load_recent_logs(job_id))
         finally:
             if detail_loading_label is not None:
                 detail_loading_label.visible = False
@@ -322,6 +552,11 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         await _show_job_detail(job_id)
         if jobs_table is not None:
             jobs_table.selected.clear()
+
+    def _handle_detail_close() -> None:
+        _stop_live_stream("Live logs paused")
+        if detail_dialog is not None:
+            detail_dialog.close()
 
     detail_dialog = ui.dialog()
     with detail_dialog:
@@ -344,10 +579,50 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 detail_timestamp_labels[field] = ui.label("").classes(
                     "text-sm text-gray-600"
                 )
-            with ui.row().classes("gap-2 mt-4"):
-                ui.button("Logs (coming later)", disabled=True)
-                ui.button("Abort (coming later)", disabled=True)
-                ui.button("Close", on_click=detail_dialog.close).props("flat")
+            with ui.card().classes("mt-4 bg-slate-50 p-3"):
+                ui.label("Recent Logs").classes("text-sm font-semibold")
+                log_loading_label = (
+                    ui.label("Loading logs...")
+                    .classes("text-sm text-gray-500")
+                    .visible(False)
+                )
+                log_error_label = (
+                    ui.label("").classes("text-sm text-red-600").visible(False)
+                )
+                log_textarea = (
+                    ui.textarea("")
+                    .props("readonly")
+                    .classes(
+                        "w-full min-h-[220px] text-xs sm:text-sm font-mono bg-white"
+                    )
+                )
+                with ui.row().classes("items-center gap-2 mt-3 flex-wrap"):
+                    log_refresh_button = ui.button("Refresh logs")
+                    log_refresh_button.on(
+                        "click",
+                        lambda _: asyncio.create_task(
+                            _load_recent_logs(current_job_id or "")
+                        ),
+                    )
+                    live_button = ui.button("Live logs", on_click=_handle_live_button)
+                    pause_button = ui.button(
+                        "Pause/Disconnect",
+                        on_click=lambda _: _stop_live_stream("Live logs paused"),
+                    )
+                    pause_button.disabled = True
+                    sse_status_label = (
+                        ui.label("Live logs inactive")
+                        .classes("text-sm text-gray-500")
+                        .style("white-space: nowrap;")
+                    )
+            with ui.row().classes("items-center gap-2 mt-4 flex-wrap"):
+                abort_button = ui.button(
+                    "Abort job", on_click=_show_abort_confirmation
+                ).props("color=negative")
+                ui.button("Close", on_click=_handle_detail_close).props("flat")
+            abort_status_label = (
+                ui.label("").classes("text-sm text-orange-600 mt-1").visible(False)
+            )
             detail_metadata_table = ui.table(
                 rows=[],
                 columns=[
@@ -368,6 +643,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 pagination=0,
             )
 
+    detail_dialog.on("close", lambda _: _stop_live_stream("Live logs paused"))
     with ui.card().classes("w-full"):
         with ui.row().classes("items-center justify-between gap-4"):
             ui.label("Jobs").classes("text-lg font-semibold")
