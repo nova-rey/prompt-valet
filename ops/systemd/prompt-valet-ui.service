@@ -1,0 +1,14 @@
+[Unit]
+Description=Prompt Valet — UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/prompt-valet/pv-ui.env
+ExecStart=/usr/bin/runuser -u ${PV_UI_USER} -- /usr/bin/env python3 /srv/prompt-valet/scripts/pv_ui.py
+WorkingDirectory=/srv/prompt-valet
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -12,3 +12,4 @@
 - P2·C4 – Job detail dialog now includes recent log tail, live SSE streaming, pause controls, and typed abort confirmation powered by the existing Phase 1 endpoints.
 - P2·C5 – Services tab surfaces Watcher and TreeBuilder visibility (status, heartbeat, targets) plus a manual refresh/error path using only the Phase 1 APIs.
 - P2·C6 – Hardened NiceGUI for mobile: responsive dashboard/detail controls, stacked submit/services flows, and more robust log streaming UX without touching the backend.
+- P2·C7 – Ops packaging, docs, and baseline for the NiceGUI UI service (env/template, systemd unit, operator guide, baseline, and debrief artifacts).

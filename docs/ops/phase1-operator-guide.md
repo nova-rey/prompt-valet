@@ -86,15 +86,52 @@ curl -s http://127.0.0.1:8888/api/v1/status | jq . | grep stalled_running
 If the API reports `stalled_running > 0`, inspect `/srv/prompt-valet/runs/{job_id}/job.json` and the log to see how old the last heartbeat is. Clearing a stale `ABORT` marker or restarting `prompt-valet-watcher.service` often resolves the stall.
 
 ## UI service
-The NiceGUI-based UI mirrors the FastAPI control plane without touching job files or the watcher tree. Install the extras (which now include `nicegui` and `httpx`) via `pip install -e ".[dev]"`, then run:
+The NiceGUI-based UI mirrors the FastAPI control plane without touching job files or the watcher tree. All UI HTTP calls flow through the API base URL, so the UI can be treated as a status/submit dashboard layer on top of the Phase 1 endpoints.
+
+### Environment template
+The UI service has its own environment template. Copy it alongside the API template before installing the service:
+```bash
+sudo mkdir -p /etc/prompt-valet
+sudo cp ops/env/pv-ui.env.example /etc/prompt-valet/pv-ui.env
+sudo chown root:root /etc/prompt-valet/pv-ui.env
+sudo chmod 644 /etc/prompt-valet/pv-ui.env
 ```
+Edit `/etc/prompt-valet/pv-ui.env` to customize `PV_API_BASE_URL`, `PV_UI_BIND_HOST`, `PV_UI_BIND_PORT`, and `PV_UI_API_TIMEOUT_SECONDS`. Leave `PV_UI_USER` set to `prompt-valet` (or point it at an existing user) so the service drops privileges via `runuser`.
+
+### Manual execution
+Install the NiceGUI and HTTPX extras via `pip install -e ".[dev]"`, then run the UI directly when you want to test without systemd:
+```bash
+PV_API_BASE_URL=http://127.0.0.1:8888/api/v1 \
+PV_UI_BIND_HOST=0.0.0.0 \
+PV_UI_BIND_PORT=8080 \
+PV_UI_API_TIMEOUT_SECONDS=5.0 \
 ./scripts/pv_ui.py
 ```
-Customize API wiring and UI binding with:
+The header indicator polls `/api/v1/healthz` and flashes green (reachable) or red (unreachable). When the UI shows “API reachable” you know the NiceGUI service can talk to the API. Open `http://127.0.0.1:8080/` to see the Dashboard/Submit/Services tabs and interact with the UI console, while the API continues to serve jobs at `/api/v1`.
+
+### Systemd service
+Copy the new unit into place, reload systemd, and start the UI when you need always-on visibility:
+```bash
+sudo cp ops/systemd/prompt-valet-ui.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start prompt-valet-ui.service
+sudo systemctl status prompt-valet-ui.service
 ```
-PV_API_BASE_URL=http://127.0.0.1:8888/api/v1
-PV_UI_BIND_HOST=0.0.0.0
-PV_UI_BIND_PORT=8080
-PV_UI_API_TIMEOUT_SECONDS=5.0
+To enable auto-start on boot:
+```bash
+sudo systemctl enable prompt-valet-ui.service
 ```
-The header indicator polls `/api/v1/healthz` and flashes green (reachable) or red (unreachable), while the Dashboard/Submit/Services tabs remain placeholders until further wiring is added.
+
+### Connectivity checks
+Check the health indicator inside the UI to confirm UI↔API connectivity. If the header stays red you can curl the API health endpoint to diagnose the backend:
+```
+curl -s http://127.0.0.1:8888/api/v1/healthz
+```
+Normal output looks like `{"status":"ok","version":"0.0.0"}`. The UI waits up to `PV_UI_API_TIMEOUT_SECONDS` seconds for each ping, so you can extend that value via the env template if the API runs on a slow host.
+
+### Troubleshooting
+Tail the service journal to surface NiceGUI or network errors:
+```bash
+sudo journalctl -u prompt-valet-ui.service -f
+```
+If the UI cannot reach the API, review `/etc/prompt-valet/pv-ui.env` for `PV_API_BASE_URL` typos and confirm the API is reachable on the bind host/port. The UI is intentionally read-only: if the UI fails or the service stops, the API, watcher, and job execution remain unaffected.

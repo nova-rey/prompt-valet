@@ -22,5 +22,10 @@
 - **Implementation (Block B)** — completed; `docs/Phase2_Debrief.md` now tells the story of Phase 2, `docs/installer_contract.md` gained the Wizard/TUI integration section, and the roadmaps now reference the new artifacts.
 - **Verification (Block C)** — completed; the new docs exist, describe the manual DRY RUN and install workflows, state the success criteria, and confirm Phase 2 is closed before handing off to Phase 3 Wizard.
 
+### P2·C7 — Ops Packaging & Baseline (Unified A/B/C)
+- **Analysis (Block A)** — completed; `docs/analysis/p2-c7-ops-packaging-baseline.md` scans the repo for Phase 1 systemd/env/phase docs and captures the UI entrypoint plus env requirements.
+- **Implementation (Block B)** — completed; `ops/systemd/prompt-valet-ui.service` and `ops/env/pv-ui.env.example` package the NiceGUI UI for systemd, `docs/ops/phase1-operator-guide.md` now covers manual/systemd start, the baseline procedure lives in `docs/phase2/baseline.md`, and `docs/phase2/phase-debrief.md` tells the Phase 2 story without future-phase speculation.
+- **Verification (Block C)** — completed; `pytest -q`, `ruff check .`, and `black --check .` now guard the UI packaging baseline, and the roadmaps reference the new docs so operators see Phase 2 closure materials.
+
 ## Phase 2 — CLOSED
 - Phase 2 is officially closed; all checkpoints (P2·C1 through P2·C4) are complete, the deterministic installer and verification surface are documented, and the hand-off toward Phase 3 (Wizard) is ready.
