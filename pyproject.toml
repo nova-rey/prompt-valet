@@ -8,12 +8,14 @@ version = "0.1.0"
 description = "Control plane helpers for Prompt Valet."
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi",
-    "uvicorn",
+    "fastapi==0.127.0",
+    "uvicorn==0.40.0",
     "pyyaml",
     "python-multipart",
-    "httpx",
-    "nicegui",
+    "httpx==0.28.1",
+    "nicegui==3.4.1",
+    "starlette==0.50.0",
+    "pydantic==2.12.5",
 ]
 
 [project.optional-dependencies]

@@ -11,7 +11,9 @@ from prompt_valet.ui import UISettings, create_ui_app
 def main() -> None:
     settings = UISettings.load()
     create_ui_app(settings)
-    ui.run(host=settings.ui_bind_host, port=settings.ui_bind_port, reload=False, workers=1)
+    ui.run(
+        host=settings.ui_bind_host, port=settings.ui_bind_port, reload=False, workers=1
+    )
 
 
 if __name__ in {"__main__", "__mp_main__"}:
