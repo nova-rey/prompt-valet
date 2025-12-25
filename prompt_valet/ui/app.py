@@ -965,6 +965,28 @@ def _build_submit_panel(
         )
         upload_submit_button.disabled = not ready
 
+    def _refresh_repo_options(repo_options: List[str]) -> None:
+        nonlocal selected_repo
+        repo_select.options = repo_options
+        repo_select.disabled = not bool(repo_options)
+        if selected_repo not in repo_options:
+            selected_repo = repo_options[0] if repo_options else None
+        repo_select.value = selected_repo
+
+    def _refresh_branch_options_for_repo(repo: str | None) -> None:
+        nonlocal selected_branch
+        if repo:
+            branches = targets_by_repo.get(repo, [])
+            branch_select.options = branches
+            branch_select.disabled = not bool(branches)
+            if selected_branch not in branches:
+                selected_branch = branches[0] if branches else None
+        else:
+            branch_select.options = []
+            branch_select.disabled = True
+            selected_branch = None
+        branch_select.value = selected_branch
+
     async def _refresh_targets() -> None:
         nonlocal selected_repo, selected_branch, targets_by_repo
         _set_visibility_if_changed(target_error_label, False)
@@ -974,10 +996,8 @@ def _build_submit_panel(
             discovered = await client.list_targets()
         except Exception as exc:  # noqa: BLE001
             targets_by_repo.clear()
-            repo_select.options = []
-            branch_select.options = []
-            selected_repo = None
-            selected_branch = None
+            _refresh_repo_options([])
+            _refresh_branch_options_for_repo(selected_repo)
             _set_text_if_changed(target_status_label, "Unable to load targets")
             _set_text_if_changed(target_error_label, f"Failed to load targets: {exc}")
             _set_visibility_if_changed(target_error_label, True)
@@ -987,12 +1007,8 @@ def _build_submit_panel(
 
         if not discovered:
             targets_by_repo.clear()
-            repo_select.options = []
-            branch_select.options = []
-            selected_repo = None
-            selected_branch = None
-            branch_select.disabled = True
-            repo_select.disabled = True
+            _refresh_repo_options([])
+            _refresh_branch_options_for_repo(selected_repo)
             _set_text_if_changed(target_status_label, "No inbox targets discovered.")
             _set_visibility_if_changed(target_error_label, False)
             _update_compose_button_enabled()
@@ -1013,26 +1029,8 @@ def _build_submit_panel(
         targets_by_repo.clear()
         targets_by_repo.update(new_map)
         repo_options = sorted(targets_by_repo.keys())
-        repo_select.options = repo_options
-        repo_select.disabled = not bool(repo_options)
-        if repo_options:
-            selected_repo = repo_options[0]
-            repo_select.value = selected_repo
-            branch_options = targets_by_repo[selected_repo]
-            branch_select.options = branch_options
-            branch_select.disabled = not bool(branch_options)
-            if branch_options:
-                selected_branch = branch_options[0]
-                branch_select.value = selected_branch
-            else:
-                selected_branch = None
-                branch_select.value = None
-        else:
-            selected_repo = None
-            selected_branch = None
-            branch_select.options = []
-            branch_select.value = None
-            branch_select.disabled = True
+        _refresh_repo_options(repo_options)
+        _refresh_branch_options_for_repo(selected_repo)
 
         _set_text_if_changed(
             target_status_label, f"{len(repo_options)} inbox repo(s) available"
@@ -1040,31 +1038,16 @@ def _build_submit_panel(
         _update_compose_button_enabled()
         _update_upload_button_enabled()
 
-    def _on_repo_change(_: Any) -> None:
-        nonlocal selected_repo, selected_branch
-        repo_value = repo_select.value or None
-        selected_repo = repo_value
-        if repo_value:
-            branches = targets_by_repo.get(repo_value, [])
-            branch_select.options = branches
-            branch_select.disabled = not bool(branches)
-            if branches:
-                selected_branch = branches[0]
-                branch_select.value = selected_branch
-            else:
-                selected_branch = None
-                branch_select.value = None
-        else:
-            branch_select.options = []
-            branch_select.value = None
-            branch_select.disabled = True
-            selected_branch = None
+    def _on_repo_change(event: Any) -> None:
+        nonlocal selected_repo
+        selected_repo = event.value or None
+        _refresh_branch_options_for_repo(selected_repo)
         _update_compose_button_enabled()
         _update_upload_button_enabled()
 
-    def _on_branch_change(_: Any) -> None:
+    def _on_branch_change(event: Any) -> None:
         nonlocal selected_branch
-        selected_branch = branch_select.value or None
+        selected_branch = event.value or None
         _update_compose_button_enabled()
         _update_upload_button_enabled()
 
