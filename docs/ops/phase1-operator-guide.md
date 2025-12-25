@@ -5,6 +5,14 @@ Ensure the Control Plane can satisfy FastAPI and its helpers. From the Prompt Va
 ```
 pip install -e ".[dev]"
 ```
+The repository pins its NiceGUI and FastAPI-related runtime dependencies so every fresh install resolves the same audited versions. See `pyproject.toml` for the definitive list, but the core stack currently requires:
+
+- `nicegui==3.4.1`
+- `fastapi==0.127.0`
+- `uvicorn==0.40.0`
+- `starlette==0.50.0`
+- `pydantic==2.12.5`
+- `httpx==0.28.1`
 This installs FastAPI, uvicorn, python-multipart, and the development/test dependencies that the API expects.
 
 ## Deploy the API service

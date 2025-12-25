@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from nicegui import ui
 from nicegui.events import MultiUploadEventArguments
@@ -33,6 +33,11 @@ _STATE_BADGE_STYLES: Dict[str, str] = {
 
 TERMINAL_STATES = {"succeeded", "failed", "aborted"}
 _SERVICE_TARGET_PREVIEW = 4
+
+
+def _schedule_async(factory: Callable[[], Coroutine[Any, Any, Any]]) -> None:
+    """Enqueue a coroutine via a one-shot NiceGUI timer so the event loop is active."""
+    ui.timer(0, lambda: asyncio.create_task(factory()), once=True)
 
 
 def _style_card(title: str, body: str) -> None:
@@ -313,9 +318,14 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         _set_sse_status("Connecting to live logs…")
         stop_event = asyncio.Event()
         live_stream_stop = stop_event
-        live_stream_task = asyncio.create_task(
-            _run_live_stream(job_id, stop_event),
-        )
+
+        def _launch_stream() -> None:
+            nonlocal live_stream_task
+            live_stream_task = asyncio.create_task(
+                _run_live_stream(job_id, stop_event),
+            )
+
+        ui.timer(0, _launch_stream, once=True)
 
     def _handle_live_button(_: Any) -> None:
         if live_requested:
@@ -449,7 +459,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                     return
                 confirmation_error.visible = False
                 confirm_dialog.close()
-                asyncio.create_task(_execute_abort(selected_job_id))
+                _schedule_async(lambda: _execute_abort(selected_job_id))
 
             confirm_button.on("click", _on_confirm)
         confirm_dialog.open()
@@ -493,14 +503,10 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         if detail_stalled_label is not None:
             if stalled_flag:
                 detail_stalled_label.set_text("Stalled")
-                detail_stalled_label.classes(
-                    "text-sm font-semibold text-orange-600"
-                )
+                detail_stalled_label.classes("text-sm font-semibold text-orange-600")
             else:
                 detail_stalled_label.set_text("Heartbeat OK")
-                detail_stalled_label.classes(
-                    "text-sm font-semibold text-emerald-600"
-                )
+                detail_stalled_label.classes("text-sm font-semibold text-emerald-600")
         age_seconds = job.get("age_seconds")
         if detail_age_label is not None:
             if isinstance(age_seconds, (int, float)) and age_seconds >= 0:
@@ -549,7 +555,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 detail_error_label.visible = True
         else:
             _render_job_detail(job)
-            asyncio.create_task(_load_recent_logs(job_id))
+            _schedule_async(lambda: _load_recent_logs(job_id))
         finally:
             if detail_loading_label is not None:
                 detail_loading_label.visible = False
@@ -629,8 +635,8 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                     )
                     log_refresh_button.on(
                         "click",
-                        lambda _: asyncio.create_task(
-                            _load_recent_logs(current_job_id or "")
+                        lambda _: _schedule_async(
+                            lambda: _load_recent_logs(current_job_id or "")
                         ),
                     )
                     live_button = ui.button(
@@ -656,7 +662,9 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                     "w-full sm:w-auto"
                 )
             abort_status_label = (
-                ui.label("").classes("text-sm text-orange-600 mt-1").set_visibility(False)
+                ui.label("")
+                .classes("text-sm text-orange-600 mt-1")
+                .set_visibility(False)
             )
             detail_metadata_table = ui.table(
                 rows=[],
@@ -686,9 +694,13 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 refresh_button = ui.button("Refresh", on_click=_refresh_jobs)
                 sort_button = ui.button("Created ↓", on_click=_toggle_sort)
         ui.label(f"API base: {settings.api_base_url}").classes("text-sm text-gray-500")
-        jobs_error_label = ui.label("").classes("text-sm text-red-600").set_visibility(False)
+        jobs_error_label = (
+            ui.label("").classes("text-sm text-red-600").set_visibility(False)
+        )
         jobs_loading_label = (
-            ui.label("Loading jobs...").classes("text-sm text-gray-500").set_visibility(False)
+            ui.label("Loading jobs...")
+            .classes("text-sm text-gray-500")
+            .set_visibility(False)
         )
         with ui.element("div").classes("w-full overflow-x-auto mt-2"):
             jobs_table = ui.table(
@@ -1069,8 +1081,14 @@ def _build_submit_panel(
     repo_select.on("change", _on_repo_change)
     branch_select.on("change", _on_branch_change)
     upload_control.on_multi_upload(_handle_file_selection)
-    compose_submit_button.on("click", lambda _: asyncio.create_task(_submit_composed()))
-    upload_submit_button.on("click", lambda _: asyncio.create_task(_submit_upload()))
+    compose_submit_button.on(
+        "click",
+        lambda _: _schedule_async(lambda: _submit_composed()),
+    )
+    upload_submit_button.on(
+        "click",
+        lambda _: _schedule_async(lambda: _submit_upload()),
+    )
     target_refresh_button.on("click", lambda _: ui.timer(0, _refresh_targets))
 
     def _set_connectivity(reachable: bool) -> None:
