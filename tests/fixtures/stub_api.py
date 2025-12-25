@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import itertools
 from datetime import datetime, timezone
 from typing import AsyncIterator, Dict, List, Sequence, Tuple
@@ -153,6 +154,40 @@ def create_stub_app() -> FastAPI:
     state = StubState()
     app = FastAPI(title="Prompt Valet UI stub")
     router = APIRouter(prefix="/api/v1")
+
+    @router.get("/healthz")
+    def healthz() -> Dict[str, str]:
+        return {"status": "ok", "version": "stub"}
+
+    @router.get("/status")
+    def status() -> Dict[str, object]:
+        counts = Counter(job.get("state") for job in state.jobs.values())
+        total_jobs = len(state.jobs)
+        stalled_running = sum(
+            1
+            for job in state.jobs.values()
+            if job.get("state") == "running" and job.get("stalled")
+        )
+        return {
+            "status": "ok",
+            "config": {
+                "runs_root": "/tmp/runs",
+                "tree_builder_root": "/tmp/tree",
+                "stall_threshold_seconds": 60,
+                "bind_host": "127.0.0.1",
+                "bind_port": 8000,
+            },
+            "jobs": {
+                "counts": dict(counts),
+                "total": total_jobs,
+                "stalled_running": stalled_running,
+            },
+            "targets": {"count": len(state.targets)},
+            "roots": {
+                "runs_root_exists": True,
+                "tree_builder_root_exists": True,
+            },
+        }
 
     @router.get("/targets")
     def list_targets() -> List[Dict[str, str | None]]:

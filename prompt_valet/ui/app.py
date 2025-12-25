@@ -44,25 +44,42 @@ def _schedule_async(factory: Callable[[], Coroutine[Any, Any, Any]]) -> None:
 
 logger = logging.getLogger(__name__)
 _PV_UI_DEBUG_REFRESH = bool(os.getenv("PV_UI_DEBUG_REFRESH"))
+_LAST_TEXT_VALUES: Dict[str, str] = {}
+
+
+def _should_update(key: str, value: Any) -> bool:
+    normalized = "" if value is None else str(value)
+    previous = _LAST_TEXT_VALUES.get(key)
+    if previous == normalized:
+        return False
+    _LAST_TEXT_VALUES[key] = normalized
+    return True
 
 
 def _set_text_if_changed(el: Any, value: str) -> None:
     """Set element text only when it changes to avoid UI flicker from timer refresh loops."""
-    current: Any = None
-    try:
-        current = getattr(el, "_pv_last_text", None)
-        if current == value:
-            return
-        setattr(el, "_pv_last_text", value)
-    except Exception:  # pragma: no cover - defensive
-        pass
+    def _normalize_key(element: Any) -> str:
+        return getattr(
+            element,
+            "_pv_text_key",
+            f"{type(element).__name__}@{id(element)}:text",
+        )
+
+    key = _normalize_key(el)
+    previous = _LAST_TEXT_VALUES.get(key)
+    if not _should_update(key, value):
+        return
     if _PV_UI_DEBUG_REFRESH:
         logger.debug(
             "UI text update on %s: %r -> %r",
             type(el).__name__,
-            current,
+            previous,
             value,
         )
+    try:
+        setattr(el, "_pv_last_text", value)
+    except Exception:  # pragma: no cover - defensive
+        pass
 
     if hasattr(el, "set_text"):
         el.set_text(value)
@@ -844,8 +861,8 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             return
         _stop_live_stream("Live logs paused (dialog hidden)")
 
-    ui.timer(0, _refresh_jobs)
-    ui.timer(10, _refresh_jobs)
+    _schedule_async(_refresh_jobs)
+    ui.timer(2.0, _refresh_jobs, immediate=False)
     ui.timer(5, _stop_live_stream_when_hidden)
 
 
@@ -853,6 +870,7 @@ def _build_submit_panel(
     settings: UISettings,
     client: PromptValetAPIClient,
     register_connectivity_listener: Callable[[Callable[[bool], None]], None],
+    test_context: Dict[str, Any] | None = None,
 ) -> None:
     targets_by_repo: Dict[str, List[str]] = {}
     selected_repo: str | None = None
@@ -948,7 +966,6 @@ def _build_submit_panel(
 
     async def _refresh_targets() -> None:
         nonlocal selected_repo, selected_branch, targets_by_repo
-        _set_text_if_changed(target_status_label, "Loading inbox targets...")
         _set_visibility_if_changed(target_error_label, False)
         repo_select.disabled = True
         branch_select.disabled = True
@@ -1159,7 +1176,7 @@ def _build_submit_panel(
             selected_uploads.clear()
             upload_control.reset()
             _update_selected_files_label()
-            _update_upload_button_enabled()
+        _update_upload_button_enabled()
 
     compose_textarea.on("input", lambda _: _update_compose_button_enabled())
     repo_select.on("change", _on_repo_change)
@@ -1173,7 +1190,7 @@ def _build_submit_panel(
         "click",
         lambda _: _schedule_async(lambda: _submit_upload()),
     )
-    target_refresh_button.on("click", lambda _: ui.timer(0, _refresh_targets))
+    target_refresh_button.on("click", lambda _: _schedule_async(_refresh_targets))
 
     def _set_connectivity(reachable: bool) -> None:
         nonlocal api_reachable
@@ -1182,11 +1199,19 @@ def _build_submit_panel(
         _update_upload_button_enabled()
 
     register_connectivity_listener(_set_connectivity)
-    ui.timer(0, _refresh_targets)
+    if test_context is not None:
+        submit_panel_hooks = test_context.setdefault("submit_panel", {})
+        submit_panel_hooks["target_status_label"] = target_status_label
+        submit_panel_hooks["refresh_targets"] = _refresh_targets
+
+    _schedule_async(_refresh_targets)
+    ui.timer(2.0, _refresh_targets, immediate=False)
 
 
 def _build_services_panel(
-    client: PromptValetAPIClient, register_connectivity_listener: Callable[[bool], None]
+    client: PromptValetAPIClient,
+    register_connectivity_listener: Callable[[bool], None],
+    test_context: Dict[str, Any] | None = None,
 ) -> None:
     ui.markdown("### Services overview")
     ui.markdown(
@@ -1196,12 +1221,13 @@ def _build_services_panel(
     refresh_button = ui.button(
         "Refresh services",
         icon="refresh",
-        on_click=lambda _: ui.timer(0, _refresh_services),
+        on_click=lambda _: _schedule_async(_refresh_services),
     ).classes("w-full sm:w-auto")
     refresh_button.disabled = True
 
+    CONNECTIVITY_HINT_BASE_CLASSES = "text-sm break-words whitespace-pre-line"
     connectivity_hint_label = ui.label("Awaiting connectivity...").classes(
-        "text-sm text-gray-500 break-words"
+        f"{CONNECTIVITY_HINT_BASE_CLASSES} text-gray-500"
     )
 
     watcher_error_label = ui.label("").classes("text-sm text-rose-600")
@@ -1268,6 +1294,25 @@ def _build_services_panel(
 
     services_refresh_in_progress = False
     api_reachable = False
+    services_timer: Any | None = None
+    services_auto_refresh_enabled = False
+    services_down_message_active = False
+    SERVICE_DOWN_MESSAGE = (
+        "Service not running\nStart backend services to populate this panel"
+    )
+
+    def _enable_services_auto_refresh() -> None:
+        nonlocal services_auto_refresh_enabled
+        if services_timer is None or services_auto_refresh_enabled:
+            return
+        services_auto_refresh_enabled = True
+        services_timer.active = True
+
+    def _disable_services_auto_refresh() -> None:
+        nonlocal services_auto_refresh_enabled
+        services_auto_refresh_enabled = False
+        if services_timer is not None:
+            services_timer.active = False
 
     def _set_badge(label: Any, state: str, stalled: bool) -> None:
         text, classes = _format_state_badge(state, stalled)
@@ -1369,16 +1414,17 @@ def _build_services_panel(
             )
 
     async def _refresh_services() -> None:
-        nonlocal services_refresh_in_progress
+        nonlocal services_refresh_in_progress, services_down_message_active
         if services_refresh_in_progress:
             return
         services_refresh_in_progress = True
         refresh_button.disabled = True
-        _set_text_if_changed(connectivity_hint_label, "Refreshing services…")
         _set_visibility_if_changed(watcher_error_label, False)
         _set_visibility_if_changed(tree_error_label, False)
+        refresh_success = False
         try:
             status_payload = await client.get_status()
+            services_down_message_active = False
             running_job: dict[str, Any] | None = None
             last_job: dict[str, Any] | None = None
             job_error: str | None = None
@@ -1407,40 +1453,81 @@ def _build_services_panel(
             _set_visibility_if_changed(tree_error_label, bool(target_error))
             if target_error:
                 _set_text_if_changed(tree_error_label, target_error)
+            refresh_success = True
         except Exception as exc:  # noqa: BLE001
+            services_down_message_active = True
             error_text = f"Failed to fetch status: {exc}"
             _set_text_if_changed(watcher_error_label, error_text)
             _set_visibility_if_changed(watcher_error_label, True)
             _set_text_if_changed(tree_error_label, error_text)
             _set_visibility_if_changed(tree_error_label, True)
+            _set_classes_if_changed(
+                connectivity_hint_label,
+                f"{CONNECTIVITY_HINT_BASE_CLASSES} text-rose-600",
+            )
+            _set_text_if_changed(connectivity_hint_label, SERVICE_DOWN_MESSAGE)
+            _disable_services_auto_refresh()
         finally:
             services_refresh_in_progress = False
-            refresh_button.disabled = not api_reachable
-            if api_reachable:
+            refresh_button.disabled = services_refresh_in_progress or not api_reachable
+            if refresh_success and api_reachable:
                 now_label = _format_timestamp_label(
                     "Last refresh",
                     datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
                 )
                 if now_label:
+                    _set_classes_if_changed(
+                        connectivity_hint_label,
+                        f"{CONNECTIVITY_HINT_BASE_CLASSES} text-gray-500",
+                    )
                     _set_text_if_changed(connectivity_hint_label, now_label)
+                _enable_services_auto_refresh()
+            elif not refresh_success:
+                _disable_services_auto_refresh()
 
     def _on_connectivity_change(reachable: bool) -> None:
         nonlocal api_reachable
+        previous_reachable = api_reachable
         api_reachable = reachable
         refresh_button.disabled = services_refresh_in_progress or not api_reachable
+        if services_down_message_active:
+            if not reachable:
+                _disable_services_auto_refresh()
+            elif not previous_reachable:
+                _schedule_async(_refresh_services)
+            return
         if reachable:
             _set_text_if_changed(connectivity_hint_label, "API reachable")
-            _set_classes_if_changed(connectivity_hint_label, "text-sm text-emerald-600")
+            _set_classes_if_changed(
+                connectivity_hint_label,
+                f"{CONNECTIVITY_HINT_BASE_CLASSES} text-emerald-600",
+            )
         else:
             _set_text_if_changed(connectivity_hint_label, "API unreachable")
-            _set_classes_if_changed(connectivity_hint_label, "text-sm text-rose-600")
+            _set_classes_if_changed(
+                connectivity_hint_label,
+                f"{CONNECTIVITY_HINT_BASE_CLASSES} text-rose-600",
+            )
+            _disable_services_auto_refresh()
+        if reachable and not previous_reachable:
+            _schedule_async(_refresh_services)
 
+    services_timer = ui.timer(
+        2.0, _refresh_services, active=False, immediate=False
+    )
+    if test_context is not None:
+        services_panel_hooks = test_context.setdefault("services_panel", {})
+        services_panel_hooks["connectivity_hint_label"] = connectivity_hint_label
+        services_panel_hooks["watcher_status_detail"] = watcher_status_detail
+        services_panel_hooks["refresh_services"] = _refresh_services
     register_connectivity_listener(_on_connectivity_change)
-    refresh_button.on("click", lambda _: ui.timer(0, _refresh_services))
-    ui.timer(0, _refresh_services)
+    _schedule_async(_refresh_services)
 
 
-def create_ui_app(settings: UISettings | None = None) -> None:
+def create_ui_app(
+    settings: UISettings | None = None,
+    test_context: Dict[str, Any] | None = None,
+) -> None:
     settings = settings or UISettings.load()
     client = PromptValetAPIClient(
         settings.api_base_url, timeout_seconds=settings.api_timeout_seconds
@@ -1483,8 +1570,8 @@ def create_ui_app(settings: UISettings | None = None) -> None:
         _set_classes_if_changed(status_icon, f"text-xl {color}")
         _set_classes_if_changed(status_label, f"font-medium {color}")
 
-    ui.timer(0, refresh_connectivity)
-    ui.timer(5, refresh_connectivity)
+    _schedule_async(refresh_connectivity)
+    ui.timer(5.0, refresh_connectivity)
     with ui.tabs().classes("w-full").props("pills") as tabs:
         ui.tab("Dashboard")
         ui.tab("Submit")
@@ -1494,6 +1581,8 @@ def create_ui_app(settings: UISettings | None = None) -> None:
         with ui.tab_panel("Dashboard"):
             _build_dashboard_panel(settings, client)
         with ui.tab_panel("Submit"):
-            _build_submit_panel(settings, client, register_connectivity_listener)
+            _build_submit_panel(
+                settings, client, register_connectivity_listener, test_context
+            )
         with ui.tab_panel("Services"):
-            _build_services_panel(client, register_connectivity_listener)
+            _build_services_panel(client, register_connectivity_listener, test_context)
