@@ -410,14 +410,14 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         except Exception as exc:  # noqa: BLE001
             if abort_status_label is not None:
                 abort_status_label.set_text(f"Abort failed: {exc}")
-                abort_status_label.set_classes("text-sm text-red-600")
+                abort_status_label.classes("text-sm text-red-600")
                 abort_status_label.visible = True
         else:
             if abort_status_label is not None:
                 abort_status_label.set_text(
                     f"Abort requested at {payload.get('abort_requested_at', 'unknown')}"
                 )
-                abort_status_label.set_classes("text-sm text-amber-600")
+                abort_status_label.classes("text-sm text-amber-600")
                 abort_status_label.visible = True
             await _refresh_current_job_detail()
         finally:
@@ -436,7 +436,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 "placeholder=ABORT"
             )
             confirmation_error = (
-                ui.label("").classes("text-sm text-red-600").visible(False)
+                ui.label("").classes("text-sm text-red-600").set_visibility(False)
             )
             with ui.row().classes("gap-2 mt-2"):
                 confirm_button = ui.button("Confirm abort").props("color=negative")
@@ -487,18 +487,18 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         current_job_state_lower = state_norm
         badge_text, badge_classes = _format_state_badge(state_norm, stalled_flag)
         detail_state_badge.set_text(badge_text)
-        detail_state_badge.set_classes(
+        detail_state_badge.classes(
             f"px-3 py-1 text-sm font-semibold rounded-full {badge_classes}"
         )
         if detail_stalled_label is not None:
             if stalled_flag:
                 detail_stalled_label.set_text("Stalled")
-                detail_stalled_label.set_classes(
+                detail_stalled_label.classes(
                     "text-sm font-semibold text-orange-600"
                 )
             else:
                 detail_stalled_label.set_text("Heartbeat OK")
-                detail_stalled_label.set_classes(
+                detail_stalled_label.classes(
                     "text-sm font-semibold text-emerald-600"
                 )
         age_seconds = job.get("age_seconds")
@@ -593,12 +593,12 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 detail_stalled_label = ui.label("")
             detail_age_label = ui.label("").classes("text-sm text-gray-500")
             detail_error_label = (
-                ui.label("").classes("text-sm text-red-600").visible(False)
+                ui.label("").classes("text-sm text-red-600").set_visibility(False)
             )
             detail_loading_label = (
                 ui.label("Loading job detail...")
                 .classes("text-sm text-gray-500")
-                .visible(False)
+                .set_visibility(False)
             )
             for field in TIMESTAMP_FIELDS:
                 detail_timestamp_labels[field] = ui.label("").classes(
@@ -609,10 +609,10 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 log_loading_label = (
                     ui.label("Loading logs...")
                     .classes("text-sm text-gray-500")
-                    .visible(False)
+                    .set_visibility(False)
                 )
                 log_error_label = (
-                    ui.label("").classes("text-sm text-red-600").visible(False)
+                    ui.label("").classes("text-sm text-red-600").set_visibility(False)
                 )
                 log_textarea = (
                     ui.textarea("")
@@ -656,7 +656,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                     "w-full sm:w-auto"
                 )
             abort_status_label = (
-                ui.label("").classes("text-sm text-orange-600 mt-1").visible(False)
+                ui.label("").classes("text-sm text-orange-600 mt-1").set_visibility(False)
             )
             detail_metadata_table = ui.table(
                 rows=[],
@@ -686,11 +686,11 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 refresh_button = ui.button("Refresh", on_click=_refresh_jobs)
                 sort_button = ui.button("Created ↓", on_click=_toggle_sort)
         ui.label(f"API base: {settings.api_base_url}").classes("text-sm text-gray-500")
-        jobs_error_label = ui.label("").classes("text-sm text-red-600").visible(False)
+        jobs_error_label = ui.label("").classes("text-sm text-red-600").set_visibility(False)
         jobs_loading_label = (
-            ui.label("Loading jobs...").classes("text-sm text-gray-500").visible(False)
+            ui.label("Loading jobs...").classes("text-sm text-gray-500").set_visibility(False)
         )
-        with ui.div().classes("w-full overflow-x-auto mt-2"):
+        with ui.element("div").classes("w-full overflow-x-auto mt-2"):
             jobs_table = ui.table(
                 rows=[],
                 columns=[
@@ -745,7 +745,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         jobs_empty_label = (
             ui.label("No jobs yet. Check back later.")
             .classes("text-sm text-gray-500")
-            .visible(False)
+            .set_visibility(False)
         )
 
     def _stop_live_stream_when_hidden() -> None:
@@ -756,7 +756,8 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             return
         _stop_live_stream("Live logs paused (dialog hidden)")
 
-    ui.timer(10, _refresh_jobs, on_start=True)
+    ui.timer(0, _refresh_jobs)
+    ui.timer(10, _refresh_jobs)
     ui.timer(5, _stop_live_stream_when_hidden)
 
 
@@ -780,14 +781,10 @@ def _build_submit_panel(
             repo_select = ui.select(
                 options=[],
                 label="Repo",
-                placeholder="Select repository",
-                disabled=True,
             ).classes("w-full sm:w-1/3")
             branch_select = ui.select(
                 options=[],
                 label="Branch",
-                placeholder="Select branch",
-                disabled=True,
             ).classes("w-full sm:w-1/3")
             target_refresh_button = ui.button("Reload targets")
         target_refresh_button.classes("w-full sm:w-auto self-start")
@@ -803,13 +800,11 @@ def _build_submit_panel(
             "Write Markdown, optionally name the file, and let the API drop it into the inbox."
         ).classes("text-sm text-gray-500 mb-2")
         compose_textarea = ui.textarea(
-            placeholder="Enter your prompt in Markdown...",
             value="",
             label="Markdown prompt",
         ).classes("w-full")
         filename_input = ui.input(
             label="Optional filename (e.g. greet.prompt.md)",
-            placeholder="Leave empty to let the API generate a name",
         ).classes("w-full mt-2")
         compose_error_label = ui.label("").classes("text-sm text-red-600 mt-2")
         compose_error_label.visible = False
@@ -1070,13 +1065,13 @@ def _build_submit_panel(
             _update_selected_files_label()
             _update_upload_button_enabled()
 
-    compose_textarea.on_change(lambda _: _update_compose_button_enabled())
-    repo_select.on_change(_on_repo_change)
-    branch_select.on_change(_on_branch_change)
+    compose_textarea.on("input", lambda _: _update_compose_button_enabled())
+    repo_select.on("change", _on_repo_change)
+    branch_select.on("change", _on_branch_change)
     upload_control.on_multi_upload(_handle_file_selection)
     compose_submit_button.on("click", lambda _: asyncio.create_task(_submit_composed()))
     upload_submit_button.on("click", lambda _: asyncio.create_task(_submit_upload()))
-    target_refresh_button.on("click", lambda _: asyncio.create_task(_refresh_targets()))
+    target_refresh_button.on("click", lambda _: ui.timer(0, _refresh_targets))
 
     def _set_connectivity(reachable: bool) -> None:
         nonlocal api_reachable
@@ -1085,7 +1080,7 @@ def _build_submit_panel(
         _update_upload_button_enabled()
 
     register_connectivity_listener(_set_connectivity)
-    asyncio.create_task(_refresh_targets())
+    ui.timer(0, _refresh_targets)
 
 
 def _build_services_panel(
@@ -1099,7 +1094,7 @@ def _build_services_panel(
     refresh_button = ui.button(
         "Refresh services",
         icon="refresh",
-        on_click=lambda _: asyncio.create_task(_refresh_services()),
+        on_click=lambda _: ui.timer(0, _refresh_services),
     ).classes("w-full sm:w-auto")
     refresh_button.disabled = True
 
@@ -1107,8 +1102,10 @@ def _build_services_panel(
         "text-sm text-gray-500 break-words"
     )
 
-    watcher_error_label = ui.label("").classes("text-sm text-rose-600").visible(False)
-    tree_error_label = ui.label("").classes("text-sm text-rose-600").visible(False)
+    watcher_error_label = ui.label("").classes("text-sm text-rose-600")
+    watcher_error_label.visible = False
+    tree_error_label = ui.label("").classes("text-sm text-rose-600")
+    tree_error_label.visible = False
 
     with ui.row().classes("items-center gap-3 mt-2 flex-col sm:flex-row"):
         refresh_button
@@ -1173,7 +1170,7 @@ def _build_services_panel(
     def _set_badge(label: Any, state: str, stalled: bool) -> None:
         text, classes = _format_state_badge(state, stalled)
         label.set_text(text)
-        label.set_classes(f"px-3 py-1 text-xs font-semibold rounded-full {classes}")
+        label.classes(f"px-3 py-1 text-xs font-semibold rounded-full {classes}")
 
     def _target_display(target: dict[str, str | None]) -> str:
         repo = target.get("full_repo") or target.get("repo") or "unknown"
@@ -1315,14 +1312,14 @@ def _build_services_panel(
         refresh_button.disabled = services_refresh_in_progress or not api_reachable
         if reachable:
             connectivity_hint_label.set_text("API reachable")
-            connectivity_hint_label.set_classes("text-sm text-emerald-600")
+            connectivity_hint_label.classes("text-sm text-emerald-600")
         else:
             connectivity_hint_label.set_text("API unreachable")
-            connectivity_hint_label.set_classes("text-sm text-rose-600")
+            connectivity_hint_label.classes("text-sm text-rose-600")
 
     register_connectivity_listener(_on_connectivity_change)
-    refresh_button.on("click", lambda _: asyncio.create_task(_refresh_services()))
-    asyncio.create_task(_refresh_services())
+    refresh_button.on("click", lambda _: ui.timer(0, _refresh_services))
+    ui.timer(0, _refresh_services)
 
 
 def create_ui_app(settings: UISettings | None = None) -> None:
@@ -1362,17 +1359,17 @@ def create_ui_app(settings: UISettings | None = None) -> None:
             color = "text-red-500"
             detail = f" ({report.detail})" if report.detail else ""
             status_label.set_text(f"API unreachable{detail}")
-        status_icon.set_classes(f"text-xl {color}")
-        status_label.set_classes(f"font-medium {color}")
+        status_icon.classes(f"text-xl {color}")
+        status_label.classes(f"font-medium {color}")
 
-    ui.timer(5, refresh_connectivity, on_start=True)
-
-    with ui.tabs().classes("w-full").props("pills"):
+    ui.timer(0, refresh_connectivity)
+    ui.timer(5, refresh_connectivity)
+    with ui.tabs().classes("w-full").props("pills") as tabs:
         ui.tab("Dashboard")
         ui.tab("Submit")
         ui.tab("Services")
 
-    with ui.tab_panels():
+    with ui.tab_panels(tabs, value="Dashboard").classes("w-full"):
         with ui.tab_panel("Dashboard"):
             _build_dashboard_panel(settings, client)
         with ui.tab_panel("Submit"):

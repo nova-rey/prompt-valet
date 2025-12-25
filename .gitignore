@@ -1,0 +1,11 @@
+
+# Prompt Valet runtime state (never commit)
+repos/
+runs/
+tmp/
+logs/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
