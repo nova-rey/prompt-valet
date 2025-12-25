@@ -58,6 +58,7 @@ def _should_update(key: str, value: Any) -> bool:
 
 def _set_text_if_changed(el: Any, value: str) -> None:
     """Set element text only when it changes to avoid UI flicker from timer refresh loops."""
+
     def _normalize_key(element: Any) -> str:
         return getattr(
             element,
@@ -1512,9 +1513,7 @@ def _build_services_panel(
         if reachable and not previous_reachable:
             _schedule_async(_refresh_services)
 
-    services_timer = ui.timer(
-        2.0, _refresh_services, active=False, immediate=False
-    )
+    services_timer = ui.timer(2.0, _refresh_services, active=False, immediate=False)
     if test_context is not None:
         services_panel_hooks = test_context.setdefault("services_panel", {})
         services_panel_hooks["connectivity_hint_label"] = connectivity_hint_label
