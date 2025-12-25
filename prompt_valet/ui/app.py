@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
@@ -38,6 +40,79 @@ _SERVICE_TARGET_PREVIEW = 4
 def _schedule_async(factory: Callable[[], Coroutine[Any, Any, Any]]) -> None:
     """Enqueue a coroutine via a one-shot NiceGUI timer so the event loop is active."""
     ui.timer(0, lambda: asyncio.create_task(factory()), once=True)
+
+
+logger = logging.getLogger(__name__)
+_PV_UI_DEBUG_REFRESH = bool(os.getenv("PV_UI_DEBUG_REFRESH"))
+
+
+def _set_text_if_changed(el: Any, value: str) -> None:
+    """Set element text only when it changes to avoid UI flicker from timer refresh loops."""
+    current: Any = None
+    try:
+        current = getattr(el, "_pv_last_text", None)
+        if current == value:
+            return
+        setattr(el, "_pv_last_text", value)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    if _PV_UI_DEBUG_REFRESH:
+        logger.debug(
+            "UI text update on %s: %r -> %r",
+            type(el).__name__,
+            current,
+            value,
+        )
+
+    if hasattr(el, "set_text"):
+        el.set_text(value)
+    elif hasattr(el, "text"):
+        el.text = value
+    elif hasattr(el, "content"):
+        el.content = value
+
+
+def _set_visibility_if_changed(el: Any, visible: bool) -> None:
+    current: Any = None
+    try:
+        current = getattr(el, "_pv_last_visible", None)
+        if current == visible:
+            return
+        setattr(el, "_pv_last_visible", visible)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    if _PV_UI_DEBUG_REFRESH:
+        logger.debug(
+            "UI visibility update on %s: %r -> %r",
+            type(el).__name__,
+            current,
+            visible,
+        )
+
+    if hasattr(el, "set_visibility"):
+        el.set_visibility(visible)
+    else:
+        setattr(el, "visible", visible)
+
+
+def _set_classes_if_changed(el: Any, classes: str) -> None:
+    current: Any = None
+    try:
+        current = getattr(el, "_pv_last_classes", None)
+        if current == classes:
+            return
+        setattr(el, "_pv_last_classes", classes)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    if _PV_UI_DEBUG_REFRESH:
+        logger.debug(
+            "UI class update on %s: %r -> %r",
+            type(el).__name__,
+            current,
+            classes,
+        )
+
+    el.classes(classes)
 
 
 def _style_card(title: str, body: str) -> None:
@@ -225,7 +300,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         rows = _build_job_rows(jobs_data, descending=sort_descending)
         jobs_table.rows = rows
         if jobs_empty_label is not None:
-            jobs_empty_label.visible = not bool(rows)
+            _set_visibility_if_changed(jobs_empty_label, not bool(rows))
 
     async def _refresh_jobs() -> None:
         nonlocal refresh_in_progress, jobs_data
@@ -235,29 +310,29 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         if refresh_button is not None:
             refresh_button.disabled = True
         if jobs_loading_label is not None:
-            jobs_loading_label.visible = True
+            _set_visibility_if_changed(jobs_loading_label, True)
         try:
             jobs_data = await client.list_jobs()
             if jobs_error_label is not None:
-                jobs_error_label.visible = False
+                _set_visibility_if_changed(jobs_error_label, False)
             _update_jobs_table()
         except Exception as exc:  # noqa: BLE001
             if jobs_error_label is not None:
-                jobs_error_label.set_text(f"Failed to load jobs: {exc}")
-                jobs_error_label.visible = True
+                _set_text_if_changed(jobs_error_label, f"Failed to load jobs: {exc}")
+                _set_visibility_if_changed(jobs_error_label, True)
         finally:
             refresh_in_progress = False
             if refresh_button is not None:
                 refresh_button.disabled = False
             if jobs_loading_label is not None:
-                jobs_loading_label.visible = False
+                _set_visibility_if_changed(jobs_loading_label, False)
 
     def _toggle_sort() -> None:
         nonlocal sort_descending
         sort_descending = not sort_descending
         if sort_button is not None:
             label = "Created ↓" if sort_descending else "Created ↑"
-            sort_button.set_text(label)
+            _set_text_if_changed(sort_button, label)
         _update_jobs_table()
 
     def _render_log_buffer() -> None:
@@ -284,7 +359,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
 
     def _set_sse_status(text: str) -> None:
         if sse_status_label is not None:
-            sse_status_label.set_text(text)
+            _set_text_if_changed(sse_status_label, text)
 
     def _update_abort_button_state(state: str | None) -> None:
         if abort_button is None:
@@ -301,7 +376,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         live_stream_task = None
         live_stream_stop = None
         if live_button is not None:
-            live_button.set_text("Live logs")
+            _set_text_if_changed(live_button, "Live logs")
         if pause_button is not None:
             pause_button.disabled = True
         _set_sse_status(message or "Live logs inactive")
@@ -314,7 +389,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         if pause_button is not None:
             pause_button.disabled = False
         if live_button is not None:
-            live_button.set_text("Live logs (stop)")
+            _set_text_if_changed(live_button, "Live logs (stop)")
         _set_sse_status("Connecting to live logs…")
         stop_event = asyncio.Event()
         live_stream_stop = stop_event
@@ -365,7 +440,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             live_stream_task = None
             live_stream_stop = None
             if live_button is not None:
-                live_button.set_text("Live logs")
+                _set_text_if_changed(live_button, "Live logs")
             if pause_button is not None:
                 pause_button.disabled = True
             _set_sse_status(final_status)
@@ -378,15 +453,15 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         if log_refresh_button is not None:
             log_refresh_button.disabled = True
         if log_loading_label is not None:
-            log_loading_label.visible = True
+            _set_visibility_if_changed(log_loading_label, True)
         if log_error_label is not None:
-            log_error_label.visible = False
+            _set_visibility_if_changed(log_error_label, False)
         try:
             text = await client.tail_job_log(job_id)
         except Exception as exc:  # noqa: BLE001
             if log_error_label is not None:
-                log_error_label.set_text(f"Failed to load logs: {exc}")
-                log_error_label.visible = True
+                _set_text_if_changed(log_error_label, f"Failed to load logs: {exc}")
+                _set_visibility_if_changed(log_error_label, True)
         else:
             _set_logs_from_text(text)
         finally:
@@ -394,7 +469,7 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             if log_refresh_button is not None:
                 log_refresh_button.disabled = False
             if log_loading_label is not None:
-                log_loading_label.visible = False
+                _set_visibility_if_changed(log_loading_label, False)
 
     async def _refresh_current_job_detail() -> None:
         if not current_job_id:
@@ -403,8 +478,10 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             job = await client.get_job_detail(current_job_id)
         except Exception as exc:  # noqa: BLE001
             if detail_error_label is not None:
-                detail_error_label.set_text(f"Failed to refresh job detail: {exc}")
-                detail_error_label.visible = True
+                _set_text_if_changed(
+                    detail_error_label, f"Failed to refresh job detail: {exc}"
+                )
+                _set_visibility_if_changed(detail_error_label, True)
         else:
             _render_job_detail(job)
 
@@ -419,16 +496,17 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             payload = await client.abort_job(job_id)
         except Exception as exc:  # noqa: BLE001
             if abort_status_label is not None:
-                abort_status_label.set_text(f"Abort failed: {exc}")
-                abort_status_label.classes("text-sm text-red-600")
-                abort_status_label.visible = True
+                _set_text_if_changed(abort_status_label, f"Abort failed: {exc}")
+                _set_classes_if_changed(abort_status_label, "text-sm text-red-600")
+                _set_visibility_if_changed(abort_status_label, True)
         else:
             if abort_status_label is not None:
-                abort_status_label.set_text(
-                    f"Abort requested at {payload.get('abort_requested_at', 'unknown')}"
+                _set_text_if_changed(
+                    abort_status_label,
+                    f"Abort requested at {payload.get('abort_requested_at', 'unknown')}",
                 )
-                abort_status_label.classes("text-sm text-amber-600")
-                abort_status_label.visible = True
+                _set_classes_if_changed(abort_status_label, "text-sm text-amber-600")
+                _set_visibility_if_changed(abort_status_label, True)
             await _refresh_current_job_detail()
         finally:
             abort_in_progress = False
@@ -445,19 +523,20 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
             confirmation_input = ui.input(label="Confirmation text").props(
                 "placeholder=ABORT"
             )
-            confirmation_error = (
-                ui.label("").classes("text-sm text-red-600").set_visibility(False)
-            )
+            confirmation_error = ui.label("").classes("text-sm text-red-600")
+            _set_visibility_if_changed(confirmation_error, False)
             with ui.row().classes("gap-2 mt-2"):
                 confirm_button = ui.button("Confirm abort").props("color=negative")
                 ui.button("Cancel", on_click=confirm_dialog.close).props("flat")
 
             def _on_confirm(_: Any) -> None:
                 if (confirmation_input.value or "").strip() != "ABORT":
-                    confirmation_error.set_text("Please type ABORT to confirm.")
-                    confirmation_error.visible = True
+                    _set_text_if_changed(
+                        confirmation_error, "Please type ABORT to confirm."
+                    )
+                    _set_visibility_if_changed(confirmation_error, True)
                     return
-                confirmation_error.visible = False
+                _set_visibility_if_changed(confirmation_error, False)
                 confirm_dialog.close()
                 _schedule_async(lambda: _execute_abort(selected_job_id))
 
@@ -472,9 +551,9 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         log_lines.clear()
         _render_log_buffer()
         if log_error_label is not None:
-            log_error_label.visible = False
+            _set_visibility_if_changed(log_error_label, False)
         if abort_status_label is not None:
-            abort_status_label.visible = False
+            _set_visibility_if_changed(abort_status_label, False)
         if log_refresh_button is not None:
             log_refresh_button.disabled = False
         _set_sse_status("Live logs inactive")
@@ -488,40 +567,45 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         ):
             return
         job_id = job.get("job_id") or "—"
-        detail_title.set_text(f"Job {job_id}")
+        _set_text_if_changed(detail_title, f"Job {job_id}")
         repo_label = _repo_display(job)
         branch_label = job.get("branch_name") or "—"
-        detail_subtitle.set_text(f"{repo_label} · {branch_label}")
+        _set_text_if_changed(detail_subtitle, f"{repo_label} · {branch_label}")
         state_norm = _normalize_state(job.get("state"))
         stalled_flag = bool(job.get("stalled"))
         current_job_state_lower = state_norm
         badge_text, badge_classes = _format_state_badge(state_norm, stalled_flag)
-        detail_state_badge.set_text(badge_text)
-        detail_state_badge.classes(
-            f"px-3 py-1 text-sm font-semibold rounded-full {badge_classes}"
+        _set_text_if_changed(detail_state_badge, badge_text)
+        _set_classes_if_changed(
+            detail_state_badge,
+            f"px-3 py-1 text-sm font-semibold rounded-full {badge_classes}",
         )
         if detail_stalled_label is not None:
             if stalled_flag:
-                detail_stalled_label.set_text("Stalled")
-                detail_stalled_label.classes("text-sm font-semibold text-orange-600")
+                _set_text_if_changed(detail_stalled_label, "Stalled")
+                _set_classes_if_changed(
+                    detail_stalled_label, "text-sm font-semibold text-orange-600"
+                )
             else:
-                detail_stalled_label.set_text("Heartbeat OK")
-                detail_stalled_label.classes("text-sm font-semibold text-emerald-600")
+                _set_text_if_changed(detail_stalled_label, "Heartbeat OK")
+                _set_classes_if_changed(
+                    detail_stalled_label, "text-sm font-semibold text-emerald-600"
+                )
         age_seconds = job.get("age_seconds")
         if detail_age_label is not None:
             if isinstance(age_seconds, (int, float)) and age_seconds >= 0:
-                detail_age_label.set_text(f"Age: {int(age_seconds)}s")
+                _set_text_if_changed(detail_age_label, f"Age: {int(age_seconds)}s")
             else:
-                detail_age_label.set_text("Age: —")
+                _set_text_if_changed(detail_age_label, "Age: —")
         for field, label in detail_timestamp_labels.items():
             label_text = _format_timestamp_label(
                 field.replace("_", " ").title(), job.get(field)
             )
             if label_text:
-                label.set_text(label_text)
-                label.visible = True
+                _set_text_if_changed(label, label_text)
+                _set_visibility_if_changed(label, True)
             else:
-                label.visible = False
+                _set_visibility_if_changed(label, False)
         if detail_metadata_table is not None:
             rows: List[Dict[str, str]] = []
             for key in sorted(job.keys()):
@@ -542,23 +626,25 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
         _prepare_for_job(job_id)
         _update_abort_button_state(None)
         if detail_error_label is not None:
-            detail_error_label.visible = False
+            _set_visibility_if_changed(detail_error_label, False)
         if detail_loading_label is not None:
-            detail_loading_label.visible = True
+            _set_visibility_if_changed(detail_loading_label, True)
         detail_dialog_open = True
         detail_dialog.open()
         try:
             job = await client.get_job_detail(job_id)
         except Exception as exc:  # noqa: BLE001
             if detail_error_label is not None:
-                detail_error_label.set_text(f"Failed to load job detail: {exc}")
-                detail_error_label.visible = True
+                _set_text_if_changed(
+                    detail_error_label, f"Failed to load job detail: {exc}"
+                )
+                _set_visibility_if_changed(detail_error_label, True)
         else:
             _render_job_detail(job)
             _schedule_async(lambda: _load_recent_logs(job_id))
         finally:
             if detail_loading_label is not None:
-                detail_loading_label.visible = False
+                _set_visibility_if_changed(detail_loading_label, False)
 
     async def _handle_job_selection(event: Any) -> None:
         if not hasattr(event, "selection") or not event.selection:
@@ -598,28 +684,24 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 detail_state_badge = ui.label("State")
                 detail_stalled_label = ui.label("")
             detail_age_label = ui.label("").classes("text-sm text-gray-500")
-            detail_error_label = (
-                ui.label("").classes("text-sm text-red-600").set_visibility(False)
+            detail_error_label = ui.label("").classes("text-sm text-red-600")
+            _set_visibility_if_changed(detail_error_label, False)
+            detail_loading_label = ui.label("Loading job detail...").classes(
+                "text-sm text-gray-500"
             )
-            detail_loading_label = (
-                ui.label("Loading job detail...")
-                .classes("text-sm text-gray-500")
-                .set_visibility(False)
-            )
+            _set_visibility_if_changed(detail_loading_label, False)
             for field in TIMESTAMP_FIELDS:
                 detail_timestamp_labels[field] = ui.label("").classes(
                     "text-sm text-gray-600"
                 )
             with ui.card().classes("mt-4 bg-slate-50 p-3").style("overflow: hidden;"):
                 ui.label("Recent Logs").classes("text-sm font-semibold")
-                log_loading_label = (
-                    ui.label("Loading logs...")
-                    .classes("text-sm text-gray-500")
-                    .set_visibility(False)
+                log_loading_label = ui.label("Loading logs...").classes(
+                    "text-sm text-gray-500"
                 )
-                log_error_label = (
-                    ui.label("").classes("text-sm text-red-600").set_visibility(False)
-                )
+                _set_visibility_if_changed(log_loading_label, False)
+                log_error_label = ui.label("").classes("text-sm text-red-600")
+                _set_visibility_if_changed(log_error_label, False)
                 log_textarea = (
                     ui.textarea("")
                     .props("readonly")
@@ -661,11 +743,8 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 ui.button("Close", on_click=_handle_detail_close).props("flat").classes(
                     "w-full sm:w-auto"
                 )
-            abort_status_label = (
-                ui.label("")
-                .classes("text-sm text-orange-600 mt-1")
-                .set_visibility(False)
-            )
+            abort_status_label = ui.label("").classes("text-sm text-orange-600 mt-1")
+            _set_visibility_if_changed(abort_status_label, False)
             detail_metadata_table = ui.table(
                 rows=[],
                 columns=[
@@ -694,14 +773,12 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 refresh_button = ui.button("Refresh", on_click=_refresh_jobs)
                 sort_button = ui.button("Created ↓", on_click=_toggle_sort)
         ui.label(f"API base: {settings.api_base_url}").classes("text-sm text-gray-500")
-        jobs_error_label = (
-            ui.label("").classes("text-sm text-red-600").set_visibility(False)
+        jobs_error_label = ui.label("").classes("text-sm text-red-600")
+        _set_visibility_if_changed(jobs_error_label, False)
+        jobs_loading_label = ui.label("Loading jobs...").classes(
+            "text-sm text-gray-500"
         )
-        jobs_loading_label = (
-            ui.label("Loading jobs...")
-            .classes("text-sm text-gray-500")
-            .set_visibility(False)
-        )
+        _set_visibility_if_changed(jobs_loading_label, False)
         with ui.element("div").classes("w-full overflow-x-auto mt-2"):
             jobs_table = ui.table(
                 rows=[],
@@ -754,11 +831,10 @@ def _build_dashboard_panel(settings: UISettings, client: PromptValetAPIClient) -
                 selection="single",
             ).classes("min-w-[660px]")
         jobs_table.on_select(_handle_job_selection)
-        jobs_empty_label = (
-            ui.label("No jobs yet. Check back later.")
-            .classes("text-sm text-gray-500")
-            .set_visibility(False)
+        jobs_empty_label = ui.label("No jobs yet. Check back later.").classes(
+            "text-sm text-gray-500"
         )
+        _set_visibility_if_changed(jobs_empty_label, False)
 
     def _stop_live_stream_when_hidden() -> None:
         nonlocal detail_dialog_open, live_stream_task
@@ -804,7 +880,7 @@ def _build_submit_panel(
             "text-sm text-gray-500 mt-2"
         )
         target_error_label = ui.label("").classes("text-sm text-red-600")
-        target_error_label.visible = False
+        _set_visibility_if_changed(target_error_label, False)
 
     with ui.card().classes("mt-4 w-full lg:w-5/6"):
         ui.label("Compose mode").classes("text-lg font-semibold")
@@ -819,15 +895,15 @@ def _build_submit_panel(
             label="Optional filename (e.g. greet.prompt.md)",
         ).classes("w-full mt-2")
         compose_error_label = ui.label("").classes("text-sm text-red-600 mt-2")
-        compose_error_label.visible = False
+        _set_visibility_if_changed(compose_error_label, False)
         with ui.row().classes(
             "items-start gap-2 mt-2 flex-col sm:flex-row"
         ) as compose_result_row:
             compose_result_label = ui.label("")
             compose_result_link = ui.link("View job detail", "#", new_tab=True)
             compose_result_link.classes("break-words")
-        compose_result_row.visible = False
-        compose_result_link.visible = False
+        _set_visibility_if_changed(compose_result_row, False)
+        _set_visibility_if_changed(compose_result_link, False)
         compose_submit_button = ui.button("Submit text").classes("w-full sm:w-auto")
         compose_submit_button.props("color=primary")
         compose_submit_button.disabled = True
@@ -843,10 +919,10 @@ def _build_submit_panel(
             "text-sm text-gray-500 mt-2 break-words"
         )
         upload_error_label = ui.label("").classes("text-sm text-red-600 mt-2")
-        upload_error_label.visible = False
+        _set_visibility_if_changed(upload_error_label, False)
         upload_results_markdown = ui.markdown("")
         upload_results_markdown.classes("text-sm text-gray-600 mt-2 break-words")
-        upload_results_markdown.visible = False
+        _set_visibility_if_changed(upload_results_markdown, False)
         with ui.row().classes("items-stretch gap-2 mt-2 flex-col sm:flex-row"):
             upload_submit_button = ui.button("Submit files").classes("w-full sm:w-auto")
         upload_submit_button.props("color=secondary")
@@ -860,9 +936,9 @@ def _build_submit_panel(
     def _update_selected_files_label() -> None:
         count = len(selected_uploads)
         if count:
-            selected_files_label.set_text(f"{count} file(s) selected")
+            _set_text_if_changed(selected_files_label, f"{count} file(s) selected")
         else:
-            selected_files_label.set_text("No files selected")
+            _set_text_if_changed(selected_files_label, "No files selected")
 
     def _update_upload_button_enabled() -> None:
         ready = bool(
@@ -872,8 +948,8 @@ def _build_submit_panel(
 
     async def _refresh_targets() -> None:
         nonlocal selected_repo, selected_branch, targets_by_repo
-        target_status_label.set_text("Loading inbox targets...")
-        target_error_label.visible = False
+        _set_text_if_changed(target_status_label, "Loading inbox targets...")
+        _set_visibility_if_changed(target_error_label, False)
         repo_select.disabled = True
         branch_select.disabled = True
         try:
@@ -884,9 +960,9 @@ def _build_submit_panel(
             branch_select.options = []
             selected_repo = None
             selected_branch = None
-            target_status_label.set_text("Unable to load targets")
-            target_error_label.set_text(f"Failed to load targets: {exc}")
-            target_error_label.visible = True
+            _set_text_if_changed(target_status_label, "Unable to load targets")
+            _set_text_if_changed(target_error_label, f"Failed to load targets: {exc}")
+            _set_visibility_if_changed(target_error_label, True)
             _update_compose_button_enabled()
             _update_upload_button_enabled()
             return
@@ -899,8 +975,8 @@ def _build_submit_panel(
             selected_branch = None
             branch_select.disabled = True
             repo_select.disabled = True
-            target_status_label.set_text("No inbox targets discovered.")
-            target_error_label.visible = False
+            _set_text_if_changed(target_status_label, "No inbox targets discovered.")
+            _set_visibility_if_changed(target_error_label, False)
             _update_compose_button_enabled()
             _update_upload_button_enabled()
             return
@@ -940,7 +1016,9 @@ def _build_submit_panel(
             branch_select.value = None
             branch_select.disabled = True
 
-        target_status_label.set_text(f"{len(repo_options)} inbox repo(s) available")
+        _set_text_if_changed(
+            target_status_label, f"{len(repo_options)} inbox repo(s) available"
+        )
         _update_compose_button_enabled()
         _update_upload_button_enabled()
 
@@ -975,18 +1053,22 @@ def _build_submit_panel(
     async def _handle_file_selection(event: MultiUploadEventArguments) -> None:
         nonlocal selected_uploads
         selected_uploads.clear()
-        upload_error_label.visible = False
+        _set_visibility_if_changed(upload_error_label, False)
         for file in event.files:
             name = file.name
             if not name or not name.lower().endswith(".md"):
-                upload_error_label.set_text("Only '.md' files are accepted.")
-                upload_error_label.visible = True
+                _set_text_if_changed(
+                    upload_error_label, "Only '.md' files are accepted."
+                )
+                _set_visibility_if_changed(upload_error_label, True)
                 continue
             try:
                 data = await file.read()
             except Exception as exc:  # noqa: BLE001
-                upload_error_label.set_text(f"Failed to read {name}: {exc}")
-                upload_error_label.visible = True
+                _set_text_if_changed(
+                    upload_error_label, f"Failed to read {name}: {exc}"
+                )
+                _set_visibility_if_changed(upload_error_label, True)
                 continue
             selected_uploads.append(
                 UploadFilePayload(
@@ -999,8 +1081,8 @@ def _build_submit_panel(
         _update_upload_button_enabled()
 
     async def _submit_composed() -> None:
-        compose_error_label.visible = False
-        compose_result_row.visible = False
+        _set_visibility_if_changed(compose_error_label, False)
+        _set_visibility_if_changed(compose_result_row, False)
         compose_submit_button.disabled = True
         if not selected_repo or not selected_branch:
             _update_compose_button_enabled()
@@ -1018,25 +1100,25 @@ def _build_submit_panel(
                 filename_value,
             )
         except Exception as exc:  # noqa: BLE001
-            compose_error_label.set_text(f"Submission failed: {exc}")
-            compose_error_label.visible = True
+            _set_text_if_changed(compose_error_label, f"Submission failed: {exc}")
+            _set_visibility_if_changed(compose_error_label, True)
         else:
             job_id = payload.get("job_id") or ""
-            compose_result_label.set_text(f"Job ID: {job_id}")
+            _set_text_if_changed(compose_result_label, f"Job ID: {job_id}")
             if job_id:
                 compose_result_link.props["href"] = (
                     f"{settings.api_base_url}/jobs/{job_id}"
                 )
-                compose_result_link.visible = True
+                _set_visibility_if_changed(compose_result_link, True)
             else:
-                compose_result_link.visible = False
-            compose_result_row.visible = True
+                _set_visibility_if_changed(compose_result_link, False)
+            _set_visibility_if_changed(compose_result_row, True)
         finally:
             _update_compose_button_enabled()
 
     async def _submit_upload() -> None:
-        upload_error_label.visible = False
-        upload_results_markdown.visible = False
+        _set_visibility_if_changed(upload_error_label, False)
+        _set_visibility_if_changed(upload_results_markdown, False)
         upload_submit_button.disabled = True
         if not selected_repo or not selected_branch or not selected_uploads:
             _update_upload_button_enabled()
@@ -1048,8 +1130,8 @@ def _build_submit_panel(
                 selected_uploads,
             )
         except Exception as exc:  # noqa: BLE001
-            upload_error_label.set_text(f"Upload failed: {exc}")
-            upload_error_label.visible = True
+            _set_text_if_changed(upload_error_label, f"Upload failed: {exc}")
+            _set_visibility_if_changed(upload_error_label, True)
         else:
             if jobs:
                 lines = [
@@ -1062,15 +1144,17 @@ def _build_submit_panel(
                     lines.append(
                         f"| {payload.filename} | {job_id} | [View job]({view_url}) |"
                     )
-                upload_results_markdown.set_text(
-                    "### Upload results\n" + "\n".join(lines)
+                _set_text_if_changed(
+                    upload_results_markdown,
+                    "### Upload results\n" + "\n".join(lines),
                 )
-                upload_results_markdown.visible = True
+                _set_visibility_if_changed(upload_results_markdown, True)
             else:
-                upload_results_markdown.set_text(
-                    "Upload succeeded with no jobs returned."
+                _set_text_if_changed(
+                    upload_results_markdown,
+                    "Upload succeeded with no jobs returned.",
                 )
-                upload_results_markdown.visible = True
+                _set_visibility_if_changed(upload_results_markdown, True)
         finally:
             selected_uploads.clear()
             upload_control.reset()
@@ -1121,9 +1205,9 @@ def _build_services_panel(
     )
 
     watcher_error_label = ui.label("").classes("text-sm text-rose-600")
-    watcher_error_label.visible = False
+    _set_visibility_if_changed(watcher_error_label, False)
     tree_error_label = ui.label("").classes("text-sm text-rose-600")
-    tree_error_label.visible = False
+    _set_visibility_if_changed(tree_error_label, False)
 
     with ui.row().classes("items-center gap-3 mt-2 flex-col sm:flex-row"):
         refresh_button
@@ -1187,8 +1271,10 @@ def _build_services_panel(
 
     def _set_badge(label: Any, state: str, stalled: bool) -> None:
         text, classes = _format_state_badge(state, stalled)
-        label.set_text(text)
-        label.classes(f"px-3 py-1 text-xs font-semibold rounded-full {classes}")
+        _set_text_if_changed(label, text)
+        _set_classes_if_changed(
+            label, f"px-3 py-1 text-xs font-semibold rounded-full {classes}"
+        )
 
     def _target_display(target: dict[str, str | None]) -> str:
         repo = target.get("full_repo") or target.get("repo") or "unknown"
@@ -1217,26 +1303,33 @@ def _build_services_panel(
             stalled_running > 0 or bool((running_job or {}).get("stalled")),
         )
         status_text = detail_state_value or status_payload.get("status", "ok")
-        watcher_status_detail.set_text(status_text.capitalize())
+        _set_text_if_changed(watcher_status_detail, status_text.capitalize())
         heartbeat_value = (running_job or last_job) and (running_job or last_job).get(
             "heartbeat_at"
         )
         heartbeat_label = _format_timestamp_label("Last heartbeat", heartbeat_value)
-        watcher_heartbeat_label.set_text(heartbeat_label or "Last heartbeat: —")
+        _set_text_if_changed(
+            watcher_heartbeat_label, heartbeat_label or "Last heartbeat: —"
+        )
         if not runs_root_exists:
-            watcher_message_label.set_text(
-                "Runs root missing; watcher cannot persist metadata."
+            _set_text_if_changed(
+                watcher_message_label,
+                "Runs root missing; watcher cannot persist metadata.",
             )
         elif stalled_running:
-            watcher_message_label.set_text(f"{stalled_running} stalled run(s)")
+            _set_text_if_changed(
+                watcher_message_label, f"{stalled_running} stalled run(s)"
+            )
         elif running_total:
-            watcher_message_label.set_text(f"{running_total} running run(s)")
+            _set_text_if_changed(
+                watcher_message_label, f"{running_total} running run(s)"
+            )
         elif total_runs:
-            watcher_message_label.set_text("No active runs right now.")
+            _set_text_if_changed(watcher_message_label, "No active runs right now.")
         else:
-            watcher_message_label.set_text("No runs recorded yet.")
+            _set_text_if_changed(watcher_message_label, "No runs recorded yet.")
         runs_root = status_payload.get("config", {}).get("runs_root") or "unknown"
-        watcher_detail_label.set_text(f"Runs root: {runs_root}")
+        _set_text_if_changed(watcher_detail_label, f"Runs root: {runs_root}")
 
     def _update_tree_card(
         status_payload: dict[str, Any], targets: list[dict[str, str | None]]
@@ -1248,25 +1341,32 @@ def _build_services_panel(
         target_count = int(summary.get("count") or len(targets))
         _set_badge(tree_status_badge, "running" if root_exists else "unknown", False)
         if root_exists:
-            tree_message_label.set_text(
-                f"{target_count} target(s) discovered"
-                if target_count
-                else "Root exists but no targets discovered yet."
+            _set_text_if_changed(
+                tree_message_label,
+                (
+                    f"{target_count} target(s) discovered"
+                    if target_count
+                    else "Root exists but no targets discovered yet."
+                ),
             )
         else:
-            tree_message_label.set_text(
-                "Configured inbox root is missing; TreeBuilder cannot sync."
+            _set_text_if_changed(
+                tree_message_label,
+                "Configured inbox root is missing; TreeBuilder cannot sync.",
             )
-        tree_detail_label.set_text(
-            f"Inbox root: {config.get('tree_builder_root') or 'unknown'}"
+        _set_text_if_changed(
+            tree_detail_label,
+            f"Inbox root: {config.get('tree_builder_root') or 'unknown'}",
         )
-        tree_target_count_label.set_text(f"Targets: {target_count}")
+        _set_text_if_changed(tree_target_count_label, f"Targets: {target_count}")
         if targets:
             preview = targets[:_SERVICE_TARGET_PREVIEW]
             list_text = "\n".join(f"- {_target_display(target)}" for target in preview)
-            target_list_markdown.set_text(list_text)
+            _set_text_if_changed(target_list_markdown, list_text)
         else:
-            target_list_markdown.set_text("No inbox targets available yet.")
+            _set_text_if_changed(
+                target_list_markdown, "No inbox targets available yet."
+            )
 
     async def _refresh_services() -> None:
         nonlocal services_refresh_in_progress
@@ -1274,9 +1374,9 @@ def _build_services_panel(
             return
         services_refresh_in_progress = True
         refresh_button.disabled = True
-        connectivity_hint_label.set_text("Refreshing services…")
-        watcher_error_label.visible = False
-        tree_error_label.visible = False
+        _set_text_if_changed(connectivity_hint_label, "Refreshing services…")
+        _set_visibility_if_changed(watcher_error_label, False)
+        _set_visibility_if_changed(tree_error_label, False)
         try:
             status_payload = await client.get_status()
             running_job: dict[str, Any] | None = None
@@ -1294,9 +1394,9 @@ def _build_services_panel(
             except Exception as exc:  # noqa: BLE001
                 job_error = f"Watcher runs unavailable: {exc}"
             _update_watcher_card(status_payload, running_job, last_job)
-            watcher_error_label.visible = bool(job_error)
+            _set_visibility_if_changed(watcher_error_label, bool(job_error))
             if job_error:
-                watcher_error_label.set_text(job_error)
+                _set_text_if_changed(watcher_error_label, job_error)
             targets: list[dict[str, str | None]] = []
             target_error: str | None = None
             try:
@@ -1304,15 +1404,15 @@ def _build_services_panel(
             except Exception as exc:  # noqa: BLE001
                 target_error = f"Failed to load targets: {exc}"
             _update_tree_card(status_payload, targets)
-            tree_error_label.visible = bool(target_error)
+            _set_visibility_if_changed(tree_error_label, bool(target_error))
             if target_error:
-                tree_error_label.set_text(target_error)
+                _set_text_if_changed(tree_error_label, target_error)
         except Exception as exc:  # noqa: BLE001
             error_text = f"Failed to fetch status: {exc}"
-            watcher_error_label.set_text(error_text)
-            watcher_error_label.visible = True
-            tree_error_label.set_text(error_text)
-            tree_error_label.visible = True
+            _set_text_if_changed(watcher_error_label, error_text)
+            _set_visibility_if_changed(watcher_error_label, True)
+            _set_text_if_changed(tree_error_label, error_text)
+            _set_visibility_if_changed(tree_error_label, True)
         finally:
             services_refresh_in_progress = False
             refresh_button.disabled = not api_reachable
@@ -1322,18 +1422,18 @@ def _build_services_panel(
                     datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
                 )
                 if now_label:
-                    connectivity_hint_label.set_text(now_label)
+                    _set_text_if_changed(connectivity_hint_label, now_label)
 
     def _on_connectivity_change(reachable: bool) -> None:
         nonlocal api_reachable
         api_reachable = reachable
         refresh_button.disabled = services_refresh_in_progress or not api_reachable
         if reachable:
-            connectivity_hint_label.set_text("API reachable")
-            connectivity_hint_label.classes("text-sm text-emerald-600")
+            _set_text_if_changed(connectivity_hint_label, "API reachable")
+            _set_classes_if_changed(connectivity_hint_label, "text-sm text-emerald-600")
         else:
-            connectivity_hint_label.set_text("API unreachable")
-            connectivity_hint_label.classes("text-sm text-rose-600")
+            _set_text_if_changed(connectivity_hint_label, "API unreachable")
+            _set_classes_if_changed(connectivity_hint_label, "text-sm text-rose-600")
 
     register_connectivity_listener(_on_connectivity_change)
     refresh_button.on("click", lambda _: ui.timer(0, _refresh_services))
@@ -1368,17 +1468,20 @@ def create_ui_app(settings: UISettings | None = None) -> None:
             listener(api_connectivity_reachable)
         if report.reachable:
             color = "text-emerald-500"
-            status_label.set_text(
-                f"API reachable (v{report.version})"
-                if report.version
-                else "API reachable"
+            _set_text_if_changed(
+                status_label,
+                (
+                    f"API reachable (v{report.version})"
+                    if report.version
+                    else "API reachable"
+                ),
             )
         else:
             color = "text-red-500"
             detail = f" ({report.detail})" if report.detail else ""
-            status_label.set_text(f"API unreachable{detail}")
-        status_icon.classes(f"text-xl {color}")
-        status_label.classes(f"font-medium {color}")
+            _set_text_if_changed(status_label, f"API unreachable{detail}")
+        _set_classes_if_changed(status_icon, f"text-xl {color}")
+        _set_classes_if_changed(status_label, f"font-medium {color}")
 
     ui.timer(0, refresh_connectivity)
     ui.timer(5, refresh_connectivity)
