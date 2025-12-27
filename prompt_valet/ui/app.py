@@ -976,6 +976,7 @@ def _build_submit_panel(
 
     def _refresh_repo_options(repo_options: List[str]) -> None:
         nonlocal selected_repo
+
         def update() -> None:
             nonlocal selected_repo
             repo_select.options = repo_options
