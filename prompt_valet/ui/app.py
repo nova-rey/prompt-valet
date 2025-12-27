@@ -877,6 +877,7 @@ def _build_submit_panel(
     selected_repo: str | None = None
     selected_branch: str | None = None
     selected_uploads: List[UploadFilePayload] = []
+    select_events_suppressed = False
     api_reachable = False
 
     with ui.card().classes("w-full"):
@@ -965,27 +966,45 @@ def _build_submit_panel(
         )
         upload_submit_button.disabled = not ready
 
+    def _execute_with_select_suppressed(action: Callable[[], None]) -> None:
+        nonlocal select_events_suppressed
+        select_events_suppressed = True
+        try:
+            action()
+        finally:
+            select_events_suppressed = False
+
     def _refresh_repo_options(repo_options: List[str]) -> None:
         nonlocal selected_repo
-        repo_select.options = repo_options
-        repo_select.disabled = not bool(repo_options)
-        if selected_repo not in repo_options:
-            selected_repo = repo_options[0] if repo_options else None
-        repo_select.value = selected_repo
+
+        def update() -> None:
+            nonlocal selected_repo
+            repo_select.options = repo_options
+            repo_select.disabled = not bool(repo_options)
+            if selected_repo not in repo_options:
+                selected_repo = repo_options[0] if repo_options else None
+            repo_select.value = selected_repo
+
+        _execute_with_select_suppressed(update)
 
     def _refresh_branch_options_for_repo(repo: str | None) -> None:
         nonlocal selected_branch
-        if repo:
-            branches = targets_by_repo.get(repo, [])
-            branch_select.options = branches
-            branch_select.disabled = not bool(branches)
-            if selected_branch not in branches:
-                selected_branch = branches[0] if branches else None
-        else:
-            branch_select.options = []
-            branch_select.disabled = True
-            selected_branch = None
-        branch_select.value = selected_branch
+
+        def update() -> None:
+            nonlocal selected_branch
+            if repo:
+                branches = targets_by_repo.get(repo, [])
+                branch_select.options = branches
+                branch_select.disabled = not bool(branches)
+                if selected_branch not in branches:
+                    selected_branch = branches[0] if branches else None
+            else:
+                branch_select.options = []
+                branch_select.disabled = True
+                selected_branch = None
+            branch_select.value = selected_branch
+
+        _execute_with_select_suppressed(update)
 
     async def _refresh_targets() -> None:
         nonlocal selected_repo, selected_branch, targets_by_repo
@@ -1040,6 +1059,8 @@ def _build_submit_panel(
 
     def _on_repo_change(event: Any) -> None:
         nonlocal selected_repo
+        if select_events_suppressed:
+            return
         selected_repo = event.value or None
         _refresh_branch_options_for_repo(selected_repo)
         _update_compose_button_enabled()
@@ -1047,6 +1068,8 @@ def _build_submit_panel(
 
     def _on_branch_change(event: Any) -> None:
         nonlocal selected_branch
+        if select_events_suppressed:
+            return
         selected_branch = event.value or None
         _update_compose_button_enabled()
         _update_upload_button_enabled()
