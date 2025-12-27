@@ -981,8 +981,13 @@ def _build_submit_panel(
             nonlocal selected_repo
             repo_select.options = repo_options
             repo_select.disabled = not bool(repo_options)
-            if selected_repo not in repo_options:
-                selected_repo = repo_options[0] if repo_options else None
+            if selected_repo in repo_options:
+                return
+            current_value = repo_select.value
+            if current_value in repo_options:
+                selected_repo = current_value
+                return
+            selected_repo = repo_options[0] if repo_options else None
             repo_select.value = selected_repo
 
         _execute_with_select_suppressed(update)
@@ -996,13 +1001,19 @@ def _build_submit_panel(
                 branches = targets_by_repo.get(repo, [])
                 branch_select.options = branches
                 branch_select.disabled = not bool(branches)
-                if selected_branch not in branches:
-                    selected_branch = branches[0] if branches else None
+                if selected_branch in branches:
+                    return
+                current_value = branch_select.value
+                if current_value in branches:
+                    selected_branch = current_value
+                    return
+                selected_branch = branches[0] if branches else None
+                branch_select.value = selected_branch
             else:
                 branch_select.options = []
                 branch_select.disabled = True
                 selected_branch = None
-            branch_select.value = selected_branch
+                branch_select.value = None
 
         _execute_with_select_suppressed(update)
 
@@ -1073,6 +1084,9 @@ def _build_submit_panel(
         selected_branch = event.value or None
         _update_compose_button_enabled()
         _update_upload_button_enabled()
+
+    def _get_selection() -> tuple[str | None, str | None]:
+        return selected_repo, selected_branch
 
     async def _handle_file_selection(event: MultiUploadEventArguments) -> None:
         nonlocal selected_uploads
@@ -1186,8 +1200,8 @@ def _build_submit_panel(
         _update_upload_button_enabled()
 
     compose_textarea.on("input", lambda _: _update_compose_button_enabled())
-    repo_select.on("change", _on_repo_change)
-    branch_select.on("change", _on_branch_change)
+    repo_select.on("update:model-value", _on_repo_change)
+    branch_select.on("update:model-value", _on_branch_change)
     upload_control.on_multi_upload(_handle_file_selection)
     compose_submit_button.on(
         "click",
@@ -1210,6 +1224,12 @@ def _build_submit_panel(
         submit_panel_hooks = test_context.setdefault("submit_panel", {})
         submit_panel_hooks["target_status_label"] = target_status_label
         submit_panel_hooks["refresh_targets"] = _refresh_targets
+        submit_panel_hooks["client"] = client
+        submit_panel_hooks["repo_select"] = repo_select
+        submit_panel_hooks["branch_select"] = branch_select
+        submit_panel_hooks["on_repo_change"] = _on_repo_change
+        submit_panel_hooks["on_branch_change"] = _on_branch_change
+        submit_panel_hooks["get_selection"] = _get_selection
 
     _schedule_async(_refresh_targets)
     ui.timer(2.0, _refresh_targets, immediate=False)
